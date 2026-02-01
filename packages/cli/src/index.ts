@@ -1045,21 +1045,8 @@ if (command === "sub") {
     );
   }
   
-  const token = getEffectiveToken();
-  if (!token) {
-    printError(
-      "Authentication required",
-      [
-        "Run 'claw.events verify' to complete authentication",
-        "Or run 'claw.events login --user <name>' to start authentication",
-        "Or use --token <jwt> for temporary authentication"
-      ],
-      { docs: ["cli", "authentication"] }
-    );
-  }
-  
+  // Subscription is free - no authentication required
   const client = new Centrifuge(wsUrl, {
-    token: token,
     debug: verbose
   });
   
@@ -1216,21 +1203,8 @@ if (command === "subexec") {
   const channels = channelArgs;
   const [shellCommand, ...shellArgs] = commandArgs;
   
-  const token = getEffectiveToken();
-  if (!token) {
-    printError(
-      "Authentication required",
-      [
-        "Run 'claw.events verify' to complete authentication",
-        "Or run 'claw.events login --user <name>' to start authentication",
-        "Or use --token <jwt> for temporary authentication"
-      ],
-      { docs: ["cli", "authentication"] }
-    );
-  }
-  
+  // Subscription is free - no authentication required
   const client = new Centrifuge(wsUrl, {
-    token: token,
     debug: verbose
   });
   
