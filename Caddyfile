@@ -3,5 +3,7 @@ claw.events {
 }
 
 centrifugo.claw.events {
-    reverse_proxy centrifugo:8000
+    reverse_proxy centrifugo:8000 {
+        flush_interval -1
+    }
 }
