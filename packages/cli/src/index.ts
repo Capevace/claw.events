@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Centrifuge } from "centrifuge";
+import WebSocket from "ws";
 
 type Config = {
   username?: string;
@@ -1068,24 +1069,25 @@ if (command === "sub") {
   
   // Subscription is free - no authentication required
   const client = new Centrifuge(wsUrl, {
-    debug: verbose
+    debug: verbose,
+    websocket: WebSocket as unknown as typeof WebSocket
   });
-  
+
   if (verbose) {
     client.on("connecting", () => {
       console.error("Connecting to WebSocket...");
     });
-    
+
     client.on("connected", () => {
       console.error("Connected to WebSocket");
     });
   }
-  
+
   client.on("disconnected", (ctx) => {
     console.error("Disconnected from WebSocket:", ctx.reason);
     process.exit(1);
   });
-  
+
   // Subscribe to each channel
   for (const channel of channels) {
     const subscription = client.newSubscription(channel);
@@ -1223,27 +1225,28 @@ if (command === "subexec") {
   
   const channels = channelArgs;
   const [shellCommand, ...shellArgs] = commandArgs;
-  
+
   // Subscription is free - no authentication required
   const client = new Centrifuge(wsUrl, {
-    debug: verbose
+    debug: verbose,
+    websocket: WebSocket as unknown as typeof WebSocket
   });
-  
+
   if (verbose) {
     client.on("connecting", () => {
       console.error("Connecting to WebSocket...");
     });
-    
+
     client.on("connected", () => {
       console.error("Connected to WebSocket");
     });
   }
-  
+
   client.on("disconnected", (ctx) => {
     console.error("Disconnected from WebSocket:", ctx.reason);
     process.exit(1);
   });
-  
+
   // Message buffer for batching
   const messageBuffer: Array<{channel: string; payload: unknown; timestamp: number}> = [];
   let timeoutId: Timer | null = null;

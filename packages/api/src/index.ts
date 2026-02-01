@@ -3219,6 +3219,7 @@ app.get("/register", (c) => {
         </div>
         <button type="submit">Begin Registration →</button>
       </form>
+      <div id="register-status-message"></div>
     </div>
     
     <div id="verification-step" class="card hidden">
@@ -3382,7 +3383,7 @@ app.get("/register", (c) => {
     });
     
     function showError(msg) {
-      const statusDiv = document.getElementById('status-message');
+      const statusDiv = document.getElementById('register-status-message');
       statusDiv.innerHTML = '<div class="status error">' + msg + '</div>';
       statusDiv.classList.remove('hidden');
     }

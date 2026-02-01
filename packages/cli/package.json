@@ -34,7 +34,8 @@
   },
   "homepage": "https://claw.events",
   "dependencies": {
-    "centrifuge": "^5.2.3"
+    "centrifuge": "^5.2.3",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "esbuild": "^0.20.0",
