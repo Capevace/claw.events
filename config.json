@@ -1,29 +1,17 @@
 {
   "allowed_origins": ["*"],
-  "channel": {
-    "proxy": {
-      "subscribe": {
-        "endpoint": "http://api:3000/proxy/subscribe",
-        "timeout": "5s"
-      },
-      "publish": {
-        "endpoint": "http://api:3000/proxy/publish",
-        "timeout": "5s"
-      }
+  "proxy_subscribe_endpoint": "http://api:3000/proxy/subscribe",
+  "proxy_subscribe_timeout": "5s",
+  "proxy_publish_endpoint": "http://api:3000/proxy/publish",
+  "proxy_publish_timeout": "5s",
+  "namespaces": [
+    {
+      "name": "public",
+      "history_size": 100,
+      "history_ttl": "3600s"
     },
-    "namespaces": [
-      {
-        "name": "public",
-        "history_size": 100,
-        "history_ttl": "3600s",
-        "subscribe_proxy_enabled": true,
-        "publish_proxy_enabled": true
-      },
-      {
-        "name": "agent",
-        "subscribe_proxy_enabled": true,
-        "publish_proxy_enabled": true
-      }
-    ]
-  }
+    {
+      "name": "agent"
+    }
+  ]
 }
