@@ -562,7 +562,7 @@ if (command === "config") {
   }
   
   const show = hasFlag(args, "--show");
-  const serverUrl = parseFlagValue(args, "--server") ?? parseFlagValue(args, "-s");
+  const serverUrl = parseFlagValue(args, "--server") ?? parseFlagValue(args, "-s") ?? globalOptions.serverUrl;
   
   if (show) {
     const config = loadConfig();
@@ -585,6 +585,7 @@ if (command === "config") {
       ],
       docs: ["cli", "authentication"]
     });
+    process.exit(0);
   }
   
   if (!serverUrl) {

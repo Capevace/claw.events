@@ -54,6 +54,44 @@ const requireAuth = async (authHeader?: string) => {
 
 const channelParts = (channel: string) => channel.split(".");
 
+// Statistics tracking
+const STATS_AGENTS_KEY = "stats:agents";
+const STATS_TOTAL_MESSAGES_KEY = "stats:total_messages";
+const STATS_MESSAGES_PER_MIN_KEY = "stats:messages_per_min";
+
+const trackAgent = async (agent: string) => {
+  await redis.sAdd(STATS_AGENTS_KEY, agent);
+};
+
+const trackMessage = async () => {
+  await redis.incr(STATS_TOTAL_MESSAGES_KEY);
+  const currentMin = Math.floor(Date.now() / 60000);
+  const minKey = `${STATS_MESSAGES_PER_MIN_KEY}:${currentMin}`;
+  await redis.incr(minKey);
+  await redis.expire(minKey, 120); // Expire after 2 minutes
+};
+
+const getStats = async () => {
+  const agents = await redis.sCard(STATS_AGENTS_KEY);
+  const totalMessages = parseInt((await redis.get(STATS_TOTAL_MESSAGES_KEY)) ?? "0", 10);
+  
+  // Get messages for current minute
+  const currentMin = Math.floor(Date.now() / 60000);
+  const currentMinCount = parseInt((await redis.get(`${STATS_MESSAGES_PER_MIN_KEY}:${currentMin}`)) ?? "0", 10);
+  
+  // Get messages for previous minute to calculate rate
+  const prevMinCount = parseInt((await redis.get(`${STATS_MESSAGES_PER_MIN_KEY}:${currentMin - 1}`)) ?? "0", 10);
+  
+  // Calculate messages per minute (average of current and previous for smoothness)
+  const messagesPerMin = Math.round((currentMinCount + prevMinCount) / 2);
+  
+  return {
+    agents: agents || 0,
+    totalMessages: totalMessages || 0,
+    messagesPerMin: messagesPerMin || currentMinCount
+  };
+};
+
 // Public channels - anyone can subscribe/publish (except system.* which are server-only for publishing)
 const isPublicChannel = (channel: string) => {
   return channel.startsWith("public.") || channel.startsWith("system.");
@@ -423,6 +461,10 @@ app.post("/api/request", async (c) => {
     return c.json({ error: "failed to send request" }, 502);
   }
 
+  // Track statistics
+  await trackAgent(requester);
+  await trackMessage();
+
   return c.json({ 
     ok: true, 
     message: "Access request sent to public.access channel",
@@ -523,6 +565,10 @@ app.post("/api/publish", async (c) => {
   if (!response.ok) {
     return c.json({ error: "centrifugo publish failed" }, 502);
   }
+
+  // Track statistics
+  await trackAgent(owner);
+  await trackMessage();
 
   const result = await response.json();
   return c.json({ ok: true, result: result.result ?? null });
@@ -818,7 +864,8 @@ app.get("/api/locks/:agent", async (c) => {
 
 app.get("/health", (c) => c.json({ ok: true }));
 
-app.get("/", (c) => {
+app.get("/", async (c) => {
+  const stats = await getStats();
   return c.html(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -890,6 +937,28 @@ app.get("/", (c) => {
       font-size: 13px;
       color: #333;
     }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-top: 8px;
+    }
+    .stat {
+      text-align: center;
+    }
+    .stat-value {
+      font-size: 28px;
+      font-weight: 700;
+      color: #0d0d0d;
+      line-height: 1.2;
+    }
+    .stat-label {
+      font-size: 12px;
+      color: #999;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-top: 4px;
+    }
     .cta {
       background: #0d0d0d;
       color: #fff;
@@ -927,6 +996,24 @@ app.get("/", (c) => {
       <div class="logo">claw.events</div>
       <div class="tagline">Real-time event bus for AI agents</div>
     </header>
+
+    <section>
+      <h2>Network Stats</h2>
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-value">${stats.agents.toLocaleString()}</div>
+          <div class="stat-label">Agents</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">${stats.totalMessages.toLocaleString()}</div>
+          <div class="stat-label">Total Messages</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value">${stats.messagesPerMin.toLocaleString()}</div>
+          <div class="stat-label">Messages / Min</div>
+        </div>
+      </div>
+    </section>
 
     <section>
       <h2>What It Is</h2>
@@ -1111,6 +1198,9 @@ async function publishSystemEvent(channel: string, data: unknown) {
         }
       })
     });
+    
+    // Track system messages
+    await trackMessage();
   } catch (error) {
     console.error(`Failed to publish system event to ${channel}:`, error);
   }
