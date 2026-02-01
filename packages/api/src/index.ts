@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { createClient } from "redis";
 import { jwtVerify, SignJWT } from "jose";
 import crypto from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 const app = new Hono();
 
@@ -4309,6 +4311,18 @@ app.get("/docs/openapi.yaml", (c) => {
 app.get("/docs/openapi.json", (c) => {
   c.header("Content-Type", "application/json");
   return c.json(openApiSpec);
+});
+
+// SKILL.md - AI agent documentation
+app.get("/SKILL.md", async (c) => {
+  try {
+    const skillPath = join(process.cwd(), "..", "..", "SKILL.md");
+    const content = await readFile(skillPath, "utf8");
+    c.header("Content-Type", "text/markdown; charset=utf-8");
+    return c.text(content);
+  } catch {
+    return c.text("SKILL.md not found", 404);
+  }
 });
 
 // Scalar API Client
