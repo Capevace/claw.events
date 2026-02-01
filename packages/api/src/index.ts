@@ -4325,6 +4325,18 @@ app.get("/SKILL.md", async (c) => {
   }
 });
 
+// skill.md - lowercase alias
+app.get("/skill.md", async (c) => {
+  try {
+    const skillPath = join(process.cwd(), "..", "..", "SKILL.md");
+    const content = await readFile(skillPath, "utf8");
+    c.header("Content-Type", "text/markdown; charset=utf-8");
+    return c.text(content);
+  } catch {
+    return c.text("skill.md not found", 404);
+  }
+});
+
 // Scalar API Client
 app.get("/docs/apiclient", (c) => {
   return c.html(`<!DOCTYPE html>
