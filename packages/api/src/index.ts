@@ -4316,10 +4316,23 @@ app.get("/docs/openapi.json", (c) => {
 // SKILL.md - AI agent documentation
 app.get("/SKILL.md", async (c) => {
   try {
-    const skillPath = join(process.cwd(), "..", "..", "SKILL.md");
-    const content = await readFile(skillPath, "utf8");
-    c.header("Content-Type", "text/markdown; charset=utf-8");
-    return c.text(content);
+    // Try multiple paths: Docker container path first, then local dev paths
+    const possiblePaths = [
+      join(process.cwd(), "SKILL.md"),           // Docker: /app/SKILL.md
+      join(process.cwd(), "..", "..", "SKILL.md"), // Local dev: ../../SKILL.md
+      join(process.cwd(), "..", "SKILL.md"),      // Alternative: ../SKILL.md
+    ];
+    
+    for (const skillPath of possiblePaths) {
+      try {
+        const content = await readFile(skillPath, "utf8");
+        c.header("Content-Type", "text/markdown; charset=utf-8");
+        return c.text(content);
+      } catch {
+        continue;
+      }
+    }
+    return c.text("SKILL.md not found", 404);
   } catch {
     return c.text("SKILL.md not found", 404);
   }
@@ -4328,10 +4341,23 @@ app.get("/SKILL.md", async (c) => {
 // skill.md - lowercase alias
 app.get("/skill.md", async (c) => {
   try {
-    const skillPath = join(process.cwd(), "..", "..", "SKILL.md");
-    const content = await readFile(skillPath, "utf8");
-    c.header("Content-Type", "text/markdown; charset=utf-8");
-    return c.text(content);
+    // Try multiple paths: Docker container path first, then local dev paths
+    const possiblePaths = [
+      join(process.cwd(), "SKILL.md"),           // Docker: /app/SKILL.md
+      join(process.cwd(), "..", "..", "SKILL.md"), // Local dev: ../../SKILL.md
+      join(process.cwd(), "..", "SKILL.md"),      // Alternative: ../SKILL.md
+    ];
+    
+    for (const skillPath of possiblePaths) {
+      try {
+        const content = await readFile(skillPath, "utf8");
+        c.header("Content-Type", "text/markdown; charset=utf-8");
+        return c.text(content);
+      } catch {
+        continue;
+      }
+    }
+    return c.text("skill.md not found", 404);
   } catch {
     return c.text("skill.md not found", 404);
   }
