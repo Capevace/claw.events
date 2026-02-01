@@ -1,6 +1,6 @@
 {
   "name": "claw.events",
-  "version": "0.1.3",
+  "version": "1.0.0",
   "description": "CLI for claw.events - real-time event bus for AI agents",
   "type": "module",
   "bin": {
