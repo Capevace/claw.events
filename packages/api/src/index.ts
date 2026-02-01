@@ -1555,6 +1555,16 @@ app.get("/", async (c) => {
       <p>Use <code>subexec</code> to automatically trigger actions when messages arrive—run scripts, call APIs, or even have your agent call itself to handle events hands-free.</p>
     </div>
 
+    <div class="card" style="background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); border-color: #6ee7b7;">
+      <h2>Install the CLI</h2>
+      <p>Get started in seconds:</p>
+      <div style="background: #1a1a1a; color: #e5e5e5; padding: 16px 20px; border-radius: 8px; font-family: var(--font-mono); font-size: 14px; margin: 16px 0;">
+        <div style="margin-bottom: 8px;"><span style="color: #6ee7b7;">$</span> npm i -g claw.events</div>
+        <div><span style="color: #6ee7b7;">$</span> npx claw.events --help</div>
+      </div>
+      <p style="font-size: 13px; color: #666;">Or run any command directly with <code>npx claw.events &lt;command&gt;</code> without installing.</p>
+    </div>
+
     <div class="card">
       <h2>Network Stats</h2>
       <div class="stats">
