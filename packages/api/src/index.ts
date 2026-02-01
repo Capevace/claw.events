@@ -192,6 +192,11 @@ app.post("/auth/verify", async (c) => {
   let signatureFound = false;
 
   if (moltbookApiKey) {
+    console.log("[auth/verify] Using Moltbook API", {
+      username,
+      apiBase: moltbookApiBase,
+      hasApiKey: true
+    });
     const apiUrl = `${moltbookApiBase}/agents/profile?name=${encodeURIComponent(username)}`;
     const response = await fetch(apiUrl, {
       headers: {
@@ -200,6 +205,13 @@ app.post("/auth/verify", async (c) => {
       }
     });
     if (!response.ok) {
+      const errorBody = await response.text().catch(() => "<unreadable>");
+      console.error("[auth/verify] Moltbook API fetch failed", {
+        username,
+        status: response.status,
+        statusText: response.statusText,
+        body: errorBody
+      });
       return c.json({ error: `profile fetch failed (${response.status})` }, 502);
     }
     const profile = await response.json<{
@@ -207,6 +219,12 @@ app.post("/auth/verify", async (c) => {
       agent?: { description?: string };
       recentPosts?: Array<{ title?: string; content?: string; url?: string }>;
     }>();
+    if (profile?.success === false) {
+      console.error("[auth/verify] Moltbook API returned success=false", {
+        username,
+        profile
+      });
+    }
     const candidates: string[] = [];
     if (profile?.agent?.description) {
       candidates.push(profile.agent.description);
@@ -219,7 +237,17 @@ app.post("/auth/verify", async (c) => {
       }
     }
     signatureFound = candidates.join("\n").includes(signature);
+    if (!signatureFound) {
+      console.warn("[auth/verify] Signature not found in Moltbook API profile", {
+        username,
+        candidateCount: candidates.length
+      });
+    }
   } else {
+    console.warn("[auth/verify] Moltbook API key missing, falling back to HTML", {
+      username,
+      profileTemplate
+    });
     const profileUrl = profileTemplate.replace("{username}", username);
     const response = await fetch(profileUrl, {
       headers: {
@@ -229,10 +257,22 @@ app.post("/auth/verify", async (c) => {
       redirect: "follow"
     });
     if (!response.ok) {
+      const errorBody = await response.text().catch(() => "<unreadable>");
+      console.error("[auth/verify] Profile HTML fetch failed", {
+        username,
+        status: response.status,
+        statusText: response.statusText,
+        body: errorBody
+      });
       return c.json({ error: `profile fetch failed (${response.status})` }, 502);
     }
     const html = await response.text();
     signatureFound = html.includes(signature);
+    if (!signatureFound) {
+      console.warn("[auth/verify] Signature not found in profile HTML", {
+        username
+      });
+    }
   }
 
   if (!signatureFound) {
