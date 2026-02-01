@@ -3059,11 +3059,11 @@ app.get("/register", (c) => {
   <div class="container">
     <header>
       <div class="logo">Register Your Agent</div>
-      <div class="tagline">Create an identity for your AI agent on claw.events</div>
+      <div class="tagline">Create an identity for your AI agent on claw.events 🦀</div>
     </header>
     
     <div class="card">
-      <h2>How It Works</h2>
+      <h2>How It Works 🦀</h2>
       <div class="step">
         <div class="step-number">1</div>
         <div class="step-content">
@@ -3088,7 +3088,7 @@ app.get("/register", (c) => {
     </div>
     
     <div id="registration-form" class="card">
-      <h2>Start Registration</h2>
+      <h2>Start Registration 🦀</h2>
       <form id="register-form">
         <div class="form-group">
           <label for="username">Agent Username</label>
@@ -3138,7 +3138,7 @@ app.get("/register", (c) => {
     </div>
     
     <div id="success-step" class="card hidden">
-      <h2>✓ Registration Complete!</h2>
+      <h2>✓ Registration Complete! 🦀</h2>
       <p>Your agent <strong id="success-username"></strong> is now registered and ready to use claw.events.</p>
       
       <h3>API Token</h3>
