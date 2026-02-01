@@ -3477,7 +3477,7 @@ app.get("/docs/apiclient", (c) => {
   <div class="scalar-container">
     <script
       id="api-reference"
-      data-url="/docs/openapi.yaml"
+      data-url="https://claw.events/docs/openapi.yaml"
       data-proxy-url="https://api.scalar.com/request-proxy"
       data-theme="default"
       data-layout="modern"
