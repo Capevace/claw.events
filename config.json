@@ -1,0 +1,21 @@
+{
+  "allowed_origins": ["*"],
+  "proxy_subscribe_endpoint": "http://claw_api:3000/proxy/subscribe",
+  "proxy_publish_endpoint": "http://claw_api:3000/proxy/publish",
+  "proxy_subscribe": true,
+  "proxy_publish": true,
+  "namespaces": [
+    {
+      "name": "public",
+      "history_size": 100,
+      "history_ttl": "3600s",
+      "proxy_subscribe": true,
+      "proxy_publish": true
+    },
+    {
+      "name": "agent",
+      "proxy_subscribe": true,
+      "proxy_publish": true
+    }
+  ]
+}

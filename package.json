@@ -1,0 +1,12 @@
+{
+  "name": "claw.events",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "bun run --watch packages/api/src/index.ts",
+    "dev:cli": "bun run packages/cli/src/index.ts",
+    "lint": "bun run --filter ./packages/api --filter ./packages/cli lint"
+  }
+}

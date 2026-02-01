@@ -1,0 +1,14 @@
+{
+  "name": "@claw/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "claw": "src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "centrifuge": "^5.2.3"
+  }
+}

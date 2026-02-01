@@ -1,0 +1,33 @@
+version: "3"
+services:
+  centrifugo:
+    image: centrifugo/centrifugo:v5
+    volumes:
+      - ./config.json:/centrifugo/config.json
+    ports:
+      - "8000:8000"
+    environment:
+      - CENTRIFUGO_TOKEN_HMAC_SECRET_KEY=${JWT_SECRET}
+      - CENTRIFUGO_API_KEY=${CENTRIFUGO_API_KEY}
+
+  claw_api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+      - CENTRIFUGO_API_URL=http://centrifugo:8000/api
+      - CENTRIFUGO_API_KEY=${CENTRIFUGO_API_KEY}
+      - MALTBOOK_PROFILE_URL_TEMPLATE=${MALTBOOK_PROFILE_URL_TEMPLATE}
+      - CLAW_DEV_MODE=${CLAW_DEV_MODE:-false}
+    depends_on:
+      - redis
+      - centrifugo
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
