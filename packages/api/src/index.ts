@@ -11,7 +11,9 @@ const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
 const centrifugoApiUrl = process.env.CENTRIFUGO_API_URL ?? "http://localhost:8000/api";
 const centrifugoApiKey = process.env.CENTRIFUGO_API_KEY ?? "";
 const profileTemplate =
-  process.env.MALTBOOK_PROFILE_URL_TEMPLATE ?? "https://maltbook.com/@{username}";
+  process.env.MALTBOOK_PROFILE_URL_TEMPLATE ?? "https://www.moltbook.com/u/{username}";
+const moltbookApiBase = process.env.MOLTBOOK_API_BASE ?? "https://www.moltbook.com/api/v1";
+const moltbookApiKey = process.env.MOLTBOOK_API_KEY ?? "";
 const devMode = process.env.CLAW_DEV_MODE === "true" || process.env.NODE_ENV === "development";
 
 if (!jwtSecret) {
@@ -187,13 +189,53 @@ app.post("/auth/verify", async (c) => {
   if (!signature) {
     return c.json({ error: "no pending signature" }, 400);
   }
-  const profileUrl = profileTemplate.replace("{username}", username);
-  const response = await fetch(profileUrl);
-  if (!response.ok) {
-    return c.json({ error: "profile fetch failed" }, 502);
+  let signatureFound = false;
+
+  if (moltbookApiKey) {
+    const apiUrl = `${moltbookApiBase}/agents/profile?name=${encodeURIComponent(username)}`;
+    const response = await fetch(apiUrl, {
+      headers: {
+        Authorization: `Bearer ${moltbookApiKey}`,
+        Accept: "application/json"
+      }
+    });
+    if (!response.ok) {
+      return c.json({ error: `profile fetch failed (${response.status})` }, 502);
+    }
+    const profile = await response.json<{
+      success?: boolean;
+      agent?: { description?: string };
+      recentPosts?: Array<{ title?: string; content?: string; url?: string }>;
+    }>();
+    const candidates: string[] = [];
+    if (profile?.agent?.description) {
+      candidates.push(profile.agent.description);
+    }
+    if (Array.isArray(profile?.recentPosts)) {
+      for (const post of profile.recentPosts) {
+        if (post?.title) candidates.push(post.title);
+        if (post?.content) candidates.push(post.content);
+        if (post?.url) candidates.push(post.url);
+      }
+    }
+    signatureFound = candidates.join("\n").includes(signature);
+  } else {
+    const profileUrl = profileTemplate.replace("{username}", username);
+    const response = await fetch(profileUrl, {
+      headers: {
+        "User-Agent": "claw.events/verification",
+        Accept: "text/html,application/xhtml+xml"
+      },
+      redirect: "follow"
+    });
+    if (!response.ok) {
+      return c.json({ error: `profile fetch failed (${response.status})` }, 502);
+    }
+    const html = await response.text();
+    signatureFound = html.includes(signature);
   }
-  const html = await response.text();
-  if (!html.includes(signature)) {
+
+  if (!signatureFound) {
     return c.json({ error: "signature not found" }, 401);
   }
   const token = await createToken(username);
