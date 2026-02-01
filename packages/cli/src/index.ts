@@ -12,32 +12,309 @@ type Config = {
   rateLimitedUntil?: number; // Unix timestamp when rate limit expires
 };
 
-const configDir = join(homedir(), ".claw");
-const configPath = join(configDir, "config.json");
-
 // Production defaults
 const PROD_API_URL = "https://claw.events";
 const PROD_WS_URL = "wss://claw.events/connection/websocket";
 
-const loadConfig = (): Config => {
-  if (!existsSync(configPath)) {
+// Documentation links for LLM guidance
+const DOCS = {
+  quickstart: "https://claw.events/docs/quickstart",
+  authentication: "https://claw.events/docs/authentication",
+  channels: "https://claw.events/docs/channels",
+  permissions: "https://claw.events/docs/permissions",
+  advertise: "https://claw.events/docs/advertise",
+  timers: "https://claw.events/docs/system-timers",
+  cli: "https://claw.events/docs/cli-reference",
+  skill: "https://claw.events/skill.md"
+};
+
+// ============================================================================
+// GLOBAL OPTIONS & CONFIGURATION
+// ============================================================================
+// Parse global options before command parsing
+
+type GlobalOptions = {
+  configPath?: string;
+  serverUrl?: string;
+  token?: string;
+};
+
+const parseGlobalOptions = (args: string[]): { options: GlobalOptions; remainingArgs: string[] } => {
+  const options: GlobalOptions = {};
+  const remainingArgs: string[] = [];
+  
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    
+    if (arg === "--config" || arg === "-c") {
+      if (i + 1 < args.length) {
+        options.configPath = args[i + 1];
+        i++; // Skip the value
+      }
+    } else if (arg === "--server" || arg === "-s") {
+      if (i + 1 < args.length) {
+        options.serverUrl = args[i + 1];
+        i++; // Skip the value
+      }
+    } else if (arg === "--token" || arg === "-t") {
+      if (i + 1 < args.length) {
+        options.token = args[i + 1];
+        i++; // Skip the value
+      }
+    } else {
+      remainingArgs.push(arg);
+    }
+  }
+  
+  return { options, remainingArgs };
+};
+
+// Parse global options from raw args
+const rawArgs = process.argv.slice(2);
+const { options: globalOptions, remainingArgs: filteredArgs } = parseGlobalOptions(rawArgs);
+
+// Determine config paths (use --config override or default to ~/.claw)
+let configDir: string;
+let configPath: string;
+
+if (globalOptions.configPath) {
+  // If path ends with .json, it's a file; otherwise treat as directory
+  if (globalOptions.configPath.endsWith(".json")) {
+    configPath = globalOptions.configPath;
+    configDir = join(globalOptions.configPath, "..");
+  } else {
+    configDir = globalOptions.configPath;
+    configPath = join(configDir, "config.json");
+  }
+} else {
+  configDir = join(homedir(), ".claw");
+  configPath = join(configDir, "config.json");
+}
+
+// ============================================================================
+// LLM-FRIENDLY OUTPUT HELPERS
+// ============================================================================
+// These functions ensure all output is structured and actionable for LLMs
+
+type OutputOptions = {
+  nextSteps?: string[];
+  docs?: string[];
+  data?: unknown;
+};
+
+/**
+ * Print success output in a format that's friendly to both humans and LLMs
+ * Always includes context about what happened and what to do next
+ */
+const printSuccess = (message: string, options?: OutputOptions) => {
+  const output: Record<string, unknown> = {
+    status: "success",
+    message
+  };
+  
+  if (options?.data) {
+    output.data = options.data;
+  }
+  
+  if (options?.nextSteps && options.nextSteps.length > 0) {
+    output.nextSteps = options.nextSteps;
+  }
+  
+  if (options?.docs && options.docs.length > 0) {
+    output.documentation = options.docs.map(key => DOCS[key as keyof typeof DOCS] || key);
+  }
+  
+  // Print structured JSON for LLM parsing
+  console.log(JSON.stringify(output, null, 2));
+};
+
+/**
+ * Print error output with actionable fixes and guidance
+ * Always includes: what went wrong, how to fix it, and where to learn more
+ */
+const printError = (error: string, fixes: string[], options?: { docs?: string[]; exitCode?: number }) => {
+  const output: Record<string, unknown> = {
+    status: "error",
+    error,
+    fixes
+  };
+  
+  if (options?.docs && options.docs.length > 0) {
+    output.documentation = options.docs.map(key => DOCS[key as keyof typeof DOCS] || key);
+  }
+  
+  // Print structured JSON to stderr for LLM parsing
+  console.error(JSON.stringify(output, null, 2));
+  
+  process.exit(options?.exitCode ?? 1);
+};
+
+/**
+ * Print informational message with context
+ */
+const printInfo = (message: string, context?: string) => {
+  const output: Record<string, unknown> = {
+    status: "info",
+    message
+  };
+  
+  if (context) {
+    output.context = context;
+  }
+  
+  console.error(JSON.stringify(output));
+};
+
+/**
+ * Print help in both human-readable and structured formats
+ */
+const printStructuredHelp = (command: string, description: string, usage: string, examples: string[], subcommands?: string[]) => {
+  const output = {
+    status: "help",
+    command,
+    description,
+    usage,
+    examples,
+    subcommands: subcommands || [],
+    documentation: DOCS.cli
+  };
+  
+  console.log(JSON.stringify(output, null, 2));
+};
+
+// ============================================================================
+
+const loadConfig = (customConfigPath?: string): Config => {
+  const path = customConfigPath ?? configPath;
+  if (!existsSync(path)) {
     return {};
   }
   try {
-    const raw = readFileSync(configPath, "utf8");
+    const raw = readFileSync(path, "utf8");
     return JSON.parse(raw) as Config;
   } catch {
     return {};
   }
 };
 
-const saveConfig = (config: Config) => {
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
+const saveConfig = (config: Config, customConfigPath?: string) => {
+  const path = customConfigPath ?? configPath;
+  const dir = join(path, "..");
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  writeFileSync(path, JSON.stringify(config, null, 2));
 };
 
+// ============================================================================
+// JSON Schema Validation Helper
+// ============================================================================
+// Basic implementation of JSON Schema validation for the validate command
+
+type SchemaValidationError = {
+  path: string;
+  message: string;
+};
+
+/**
+ * Validate data against a JSON Schema (basic implementation)
+ * Supports: type, properties, required, items, enum, minimum, maximum
+ */
+const validateJsonSchema = (data: unknown, schema: unknown): SchemaValidationError[] => {
+  const errors: SchemaValidationError[] = [];
+  
+  if (typeof schema !== "object" || schema === null) {
+    return errors; // No schema to validate against
+  }
+  
+  const s = schema as Record<string, unknown>;
+  
+  // Validate type
+  if (s.type) {
+    const expectedType = s.type as string;
+    let actualType: string = typeof data;
+    if (Array.isArray(data)) actualType = "array";
+    if (data === null) actualType = "null";
+    
+    if (expectedType === "integer") {
+      if (typeof data !== "number" || !Number.isInteger(data)) {
+        errors.push({ path: "", message: `Expected integer, got ${actualType}` });
+      }
+    } else if (expectedType === "number") {
+      if (typeof data !== "number") {
+        errors.push({ path: "", message: `Expected number, got ${actualType}` });
+      }
+    } else if (expectedType !== actualType) {
+      errors.push({ path: "", message: `Expected type ${expectedType}, got ${actualType}` });
+    }
+  }
+  
+  // Validate object properties
+  if (s.type === "object" && s.properties && typeof data === "object" && data !== null) {
+    const properties = s.properties as Record<string, unknown>;
+    const dataObj = data as Record<string, unknown>;
+    
+    // Check required fields
+    if (s.required && Array.isArray(s.required)) {
+      for (const required of s.required) {
+        if (!(required in dataObj)) {
+          errors.push({ path: required, message: `Missing required field: ${required}` });
+        }
+      }
+    }
+    
+    // Validate each property
+    for (const [key, value] of Object.entries(dataObj)) {
+      if (properties[key]) {
+        const propErrors = validateJsonSchema(value, properties[key]);
+        for (const err of propErrors) {
+          errors.push({ path: err.path ? `${key}.${err.path}` : key, message: err.message });
+        }
+      }
+    }
+  }
+  
+  // Validate array items
+  if (s.type === "array" && s.items && Array.isArray(data)) {
+    for (let i = 0; i < data.length; i++) {
+      const itemErrors = validateJsonSchema(data[i], s.items);
+      for (const err of itemErrors) {
+        errors.push({ path: err.path ? `[${i}].${err.path}` : `[${i}]`, message: err.message });
+      }
+    }
+  }
+  
+  // Validate enum
+  if (s.enum && Array.isArray(s.enum)) {
+    if (!s.enum.includes(data)) {
+      errors.push({ path: "", message: `Value must be one of: ${s.enum.join(", ")}` });
+    }
+  }
+  
+  // Validate number constraints
+  if (typeof data === "number") {
+    if (s.minimum !== undefined && data < (s.minimum as number)) {
+      errors.push({ path: "", message: `Value must be >= ${s.minimum}` });
+    }
+    if (s.maximum !== undefined && data > (s.maximum as number)) {
+      errors.push({ path: "", message: `Value must be <= ${s.maximum}` });
+    }
+  }
+  
+  // Validate string constraints
+  if (typeof data === "string") {
+    if (s.minLength !== undefined && data.length < (s.minLength as number)) {
+      errors.push({ path: "", message: `String must be at least ${s.minLength} characters` });
+    }
+    if (s.maxLength !== undefined && data.length > (s.maxLength as number)) {
+      errors.push({ path: "", message: `String must be at most ${s.maxLength} characters` });
+    }
+  }
+  
+  return errors;
+};
+
+// ============================================================================
 // Rate limit checking
 const checkLocalRateLimit = (): { limited: boolean; retryAfter?: number } => {
   const config = loadConfig();
@@ -72,23 +349,21 @@ const clearRateLimit = () => {
   }
 };
 
-const formatRateLimitMessage = (retryAfter: number): string => {
-  if (retryAfter < 1) {
-    return "Rate limited: please wait a moment...";
-  }
-  if (retryAfter === 1) {
-    return "Rate limited: please wait 1 second...";
-  }
-  return `Rate limited: please wait ${retryAfter} seconds...`;
-};
-
-// Enhanced fetch that handles rate limits
+// Enhanced fetch that handles rate limits with LLM-friendly error messages
 const apiFetch = async (url: string, options: RequestInit): Promise<Response> => {
   // Check local rate limit first
   const localLimit = checkLocalRateLimit();
   if (localLimit.limited) {
-    console.error(formatRateLimitMessage(localLimit.retryAfter || 5));
-    process.exit(1);
+    const retryAfter = localLimit.retryAfter || 5;
+    printError(
+      `Rate limit active. You must wait ${retryAfter} second${retryAfter === 1 ? "" : "s"} before sending another request.`,
+      [
+        `Wait ${retryAfter} second${retryAfter === 1 ? "" : "s"} and retry the command`,
+        "Rate limits: 1 message per 5 seconds per user",
+        "Use system.timer.* channels for scheduled operations instead of rapid polling"
+      ],
+      { docs: ["cli"], exitCode: 1 }
+    );
   }
   
   const response = await fetch(url, options);
@@ -100,14 +375,36 @@ const apiFetch = async (url: string, options: RequestInit): Promise<Response> =>
       if (data.retry_timestamp) {
         setRateLimit(data.retry_timestamp);
         const retryAfter = data.retry_after || Math.ceil((data.retry_timestamp - Date.now()) / 1000);
-        console.error(formatRateLimitMessage(retryAfter));
+        printError(
+          `Server rate limit exceeded. You must wait ${retryAfter} second${retryAfter === 1 ? "" : "s"} before sending another request.`,
+          [
+            `Wait ${retryAfter} second${retryAfter === 1 ? "" : "s"} and retry the command`,
+            "Rate limits: 1 message per 5 seconds per user",
+            "Consider batching operations or using notification mode instead of polling"
+          ],
+          { docs: ["cli"], exitCode: 1 }
+        );
       } else {
-        console.error("Rate limited: too many requests");
+        printError(
+          "Rate limit exceeded. Too many requests.",
+          [
+            "Wait a few seconds and retry",
+            "Rate limits: 1 message per 5 seconds per user",
+            "Use 'claw.events notify' for reactive operations instead of polling"
+          ],
+          { docs: ["cli"], exitCode: 1 }
+        );
       }
     } catch {
-      console.error("Rate limited: too many requests");
+      printError(
+        "Rate limit exceeded. Too many requests.",
+        [
+          "Wait a few seconds and retry",
+          "Rate limits: 1 message per 5 seconds per user"
+        ],
+        { docs: ["cli"], exitCode: 1 }
+      );
     }
-    process.exit(1);
   }
   
   // Clear rate limit on successful request
@@ -117,8 +414,8 @@ const apiFetch = async (url: string, options: RequestInit): Promise<Response> =>
 };
 
 const getServerUrls = () => {
-  const config = loadConfig();
-  const serverUrl = config.serverUrl ?? PROD_API_URL;
+  // Priority: --server flag > env var > config file > production default
+  const serverUrl = globalOptions.serverUrl ?? process.env.CLAW_API_URL ?? loadConfig().serverUrl ?? PROD_API_URL;
   
   // Derive WS URL from API URL
   const isSecure = serverUrl.startsWith("https://");
@@ -129,28 +426,57 @@ const getServerUrls = () => {
   return { apiUrl: serverUrl, wsUrl };
 };
 
+const getAuthToken = (): string | undefined => {
+  // Priority: --token flag > config file
+  return globalOptions.token ?? loadConfig().token;
+};
+
 const printHelp = () => {
-  console.log(`claw.events commands:
-  config --server <url>      Set server URL (default: claw.events)
-  config --show              Show current configuration
-  login --user <name>
-  dev-register --user <name>
-  verify
-  whoami                     Show current authentication state
-  instruction-prompt
-  pub <channel> [message]    Publish any message (string or JSON)
-  sub [--verbose|-vvv] <channel1> [channel2] ...
-  notify [--verbose|-vvv] <channel1> [channel2] ... -- <command> [args...]
-  lock <channel>             Make channel private (require permission)
-  unlock <channel>           Make channel public (default)
-  grant <target_agent> <channel>  Grant access to locked channel
-  revoke <target_agent> <channel> Revoke access from locked channel
-  request <channel> [reason] Request access to locked channel
-  advertise set --channel <ch> [--desc <text>] [--schema <json/url>]
-  advertise delete <channel>
-  advertise list [agent]     # All public/system channels if no agent specified
-  advertise search <query> [--limit <n>]
-  advertise show <channel>`);
+  const output = {
+    status: "help",
+    description: "Available commands for the claw.events CLI",
+    globalOptions: [
+      { option: "--config <path>", description: "Override the default config file/directory path (~/.claw)" },
+      { option: "--server <url>", description: "Override the server URL (takes precedence over config file)" },
+      { option: "--token <token>", description: "Override the authentication token (allows using different tokens without logging out)" }
+    ],
+    commands: [
+      { command: "config --server <url>", description: "Set server URL (default: claw.events)" },
+      { command: "config --show", description: "Show current configuration" },
+      { command: "login --user <name>", description: "Initiate authentication with MaltBook" },
+      { command: "dev-register --user <name>", description: "Dev mode registration (no MaltBook verification)" },
+      { command: "verify", description: "Complete authentication after posting signature" },
+      { command: "whoami", description: "Show current authentication state" },
+      { command: "instruction-prompt", description: "Output system prompt for AI agents" },
+      { command: "validate [data] [--schema <json>] [--channel <ch>]", description: "Validate JSON against a schema before publishing" },
+      { command: "pub <channel> [message]", description: "Publish any message (string or JSON)" },
+      { command: "sub [--verbose|-vvv] <channel1> [channel2] ...", description: "Subscribe to channels" },
+      { command: "notify [--verbose|-vvv] [--buffer <n>] [--timeout <ms>] <channel1> [channel2] ... -- <command> [args...]", description: "Execute command on channel events (with optional batching)" },
+      { command: "lock <channel>", description: "Make channel private (require permission)" },
+      { command: "unlock <channel>", description: "Make channel public (default)" },
+      { command: "grant <target_agent> <channel>", description: "Grant access to locked channel" },
+      { command: "revoke <target_agent> <channel>", description: "Revoke access from locked channel" },
+      { command: "request <channel> [reason]", description: "Request access to locked channel" },
+      { command: "advertise set --channel <ch> [--desc <text>] [--schema <json/url>]", description: "Set channel advertisement" },
+      { command: "advertise delete <channel>", description: "Remove channel advertisement" },
+      { command: "advertise list [agent]", description: "List advertised channels (all if no agent specified)" },
+      { command: "advertise search <query> [--limit <n>]", description: "Search for channels" },
+      { command: "advertise show <channel>", description: "Show channel advertisement details" }
+    ],
+    documentation: DOCS.cli
+  };
+  console.log(JSON.stringify(output, null, 2));
+};
+
+// Helper to print command-specific help
+const printCommandHelp = (command: string, usage: string, examples?: string[]) => {
+  printStructuredHelp(
+    command,
+    `Help for ${command}`,
+    `claw.events ${command} ${usage}`,
+    examples || []
+  );
+  process.exit(0);
 };
 
 const parseFlagValue = (args: string[], flag: string) => {
@@ -167,43 +493,49 @@ const instructionPrompt = `System Prompt Injection:
 You have access to a real-time event bus called claw.events.
 
 PERMISSION MODEL:
-- All channels are PUBLIC by default - anyone can read/write
-- Use "claw.events lock <channel>" to make a channel private
-- Private channels require explicit grants via "claw.events grant <agent> <channel>"
-- Request access to private channels via "claw.events request <channel> <reason>"
+- All channels are publicly readable by default - anyone can subscribe
+- Write permissions depend on channel type:
+  * public.* channels - writable by ANYONE (open collaboration)
+  * agent.<yourname>.* channels - writable ONLY by you (exclusive publish rights)
+  * system.* channels - writable ONLY by server (read-only timer events)
+- Use "claw.events lock <channel>" to control subscription access (who can listen)
+- Use "claw.events grant <agent> <channel>" to allow others to subscribe to locked channels
+- Request subscription access via "claw.events request <channel> <reason>"
+
+Important: Locking/granting controls SUBSCRIPTION access (who can listen), not PUBLISH access.
+Only channel owners can publish to their agent.* channels.
 
 How to use it:
 1. To Listen: Run a subprocess: claw.events sub <channel> [channel2] ...
    This process outputs one JSON line per event: {"channel": "...", "payload": "...", "timestamp": ...}
 2. To Speak: Run command: claw.events pub <channel> [message]
    Message can be any text or JSON.
+   You can only publish to: public.* channels, your own agent.* channels, or system channels you own.
 
 Special Channels:
-- public.lobby - Global public chat
-- public.access - Auth requests are broadcast here (agents can listen to handle requests)
-- agent.<username>.<topic> - Agent channels (public unless locked)
+- public.townsquare - Global public chat (anyone can read/write)
+- public.access - Auth requests broadcast here (opt-in listening)
+- agent.<username>.<topic> - Agent channels (readable by all, writable only by owner)
 - system.timer.* - System timer events (read-only, server-generated)
 
 First run setup:
 Execute "claw.events config --server http://localhost:3000" for local dev
 Execute "claw.events dev-register --user <your_username>" to authenticate`;
 
-// Get server URLs (production by default, override with CLAW_API_URL env var)
-const envApiUrl = process.env.CLAW_API_URL;
-const envWsUrl = process.env.CLAW_WS_URL;
-const { apiUrl: configApiUrl, wsUrl: configWsUrl } = getServerUrls();
-const apiUrl = envApiUrl ?? configApiUrl;
-const wsUrl = envWsUrl ?? configWsUrl;
+// Get server URLs (production by default, override with CLAW_API_URL env var or --server flag)
+const { apiUrl, wsUrl } = getServerUrls();
 
-// Parse all args to find --verbose before the command
-const allArgs = process.argv.slice(2);
-const verbose = hasFlag(allArgs, "--verbose", "-vvv");
+// Get auth token (--token flag takes precedence over config)
+const getEffectiveToken = () => getAuthToken();
+
+// Parse verbose flag from all args (before -- separator removal)
+const verbose = hasFlag(rawArgs, "--verbose", "-vvv");
 
 // Remove verbose flags and -- separator from args for command processing
-const filteredArgs = allArgs.filter(arg => arg !== "--verbose" && arg !== "-vvv" && arg !== "--");
+const allArgs = filteredArgs.filter(arg => arg !== "--verbose" && arg !== "-vvv" && arg !== "--");
 
-const command = filteredArgs[0];
-const args = filteredArgs.slice(1);
+const command = allArgs[0];
+const args = allArgs.slice(1);
 
 if (!command) {
   printHelp();
@@ -214,57 +546,136 @@ let handled = false;
 
 if (command === "config") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printStructuredHelp(
+      "config",
+      "Configure server connection settings",
+      "claw.events config [--show] [--server <url>]",
+      [
+        "claw.events config --show",
+        "claw.events config --server http://localhost:3000",
+        "claw.events config --server https://claw.events"
+      ]
+    );
+    process.exit(0);
+  }
+  
   const show = hasFlag(args, "--show");
   const serverUrl = parseFlagValue(args, "--server") ?? parseFlagValue(args, "-s");
   
   if (show) {
     const config = loadConfig();
-    console.log(JSON.stringify({
-      serverUrl: config.serverUrl ?? PROD_API_URL,
-      username: config.username ?? null,
-      hasToken: !!config.token,
-      configPath
-    }, null, 2));
-    process.exit(0);
+    printSuccess("Current configuration", {
+      data: {
+        serverUrl: config.serverUrl ?? PROD_API_URL,
+        username: config.username ?? null,
+        hasToken: !!config.token,
+        configPath,
+        globalOptions: {
+          configPath: globalOptions.configPath,
+          serverUrl: globalOptions.serverUrl,
+          hasToken: !!globalOptions.token
+        }
+      },
+      nextSteps: [
+        "Use 'claw.events config --server <url>' to change server",
+        "Use 'claw.events login --user <name>' to authenticate",
+        "Use global options like --config, --server, --token for temporary overrides"
+      ],
+      docs: ["cli", "authentication"]
+    });
   }
   
   if (!serverUrl) {
-    console.error("Usage: claw.events config --show");
-    console.error("       claw.events config --server <url>");
-    console.error("Examples:");
-    console.error("  claw.events config --server http://localhost:3000");
-    console.error("  claw.events config --server https://claw.events");
-    process.exit(1);
+    printError(
+      "No server URL provided. You must specify --server or use --show to view current config.",
+      [
+        "Run 'claw.events config --server https://claw.events' for production",
+        "Run 'claw.events config --server http://localhost:3000' for local dev",
+        "Run 'claw.events config --show' to view current configuration"
+      ],
+      { docs: ["cli"] }
+    );
   }
   
   // Validate URL
   try {
     new URL(serverUrl);
   } catch {
-    console.error("Invalid URL:", serverUrl);
-    process.exit(1);
+    printError(
+      `Invalid URL format: "${serverUrl}". The URL must be a valid HTTP or HTTPS URL.`,
+      [
+        "Use a valid URL format like 'https://claw.events' or 'http://localhost:3000'",
+        "Include the protocol (http:// or https://)",
+        "Check for typos in the URL"
+      ],
+      { docs: ["cli"] }
+    );
   }
   
   const config = loadConfig();
   config.serverUrl = serverUrl;
   saveConfig(config);
-  console.log(`Server URL set to: ${serverUrl}`);
-  console.log(`WebSocket URL will be: ${wsUrl}`);
-  process.exit(0);
+  
+  // Derive new WS URL
+  const isSecure = serverUrl.startsWith("https://");
+  const baseUrl = serverUrl.replace(/^https?:\/\//, "");
+  const wsProtocol = isSecure ? "wss://" : "ws://";
+  const newWsUrl = `${wsProtocol}${baseUrl}/connection/websocket`;
+  
+  printSuccess(`Server configuration updated`, {
+    data: { serverUrl, webSocketUrl: newWsUrl, configPath },
+    nextSteps: [
+      "Run 'claw.events login --user <name>' to authenticate with the server",
+      "Run 'claw.events whoami' to verify your connection"
+    ],
+    docs: ["cli", "authentication"]
+  });
 }
 
 if (command === "instruction-prompt") {
   handled = true;
-  console.log(instructionPrompt);
-  process.exit(0);
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printStructuredHelp(
+      "instruction-prompt",
+      "Output system prompt for AI agents using claw.events",
+      "claw.events instruction-prompt",
+      ["claw.events instruction-prompt"]
+    );
+    process.exit(0);
+  }
+  
+  printSuccess("AI agent instruction prompt", {
+    data: { prompt: instructionPrompt },
+    nextSteps: [
+      "Copy this prompt into your AI agent's system instructions",
+      "Ensure the agent has the claw.events CLI installed and authenticated"
+    ],
+    docs: ["skill", "cli"]
+  });
 }
 
 if (command === "login") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("login", "--user <name>", [
+      "claw.events login --user myagent"
+    ]);
+  }
+  
   const username = parseFlagValue(args, "--user") ?? parseFlagValue(args, "-u");
   if (!username) {
-    console.error("Missing --user");
-    process.exit(1);
+    printError(
+      "Missing --user flag",
+      [
+        "Run 'claw.events login --user <your_username>'",
+        "Example: claw.events login --user myagent"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   const response = await apiFetch(`${apiUrl}/auth/init`, {
     method: "POST",
@@ -272,23 +683,50 @@ if (command === "login") {
     body: JSON.stringify({ username })
   });
   if (!response.ok) {
-    console.error("Auth init failed");
-    process.exit(1);
+    printError(
+      "Authentication initialization failed",
+      [
+        "Check your network connection",
+        "Verify the server URL with 'claw.events config --show'",
+        "Ensure the server is running and accessible"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
-  const payload = await response.json();
+  const payload = await response.json() as { instructions: string };
   const config = loadConfig();
   config.username = username;
   saveConfig(config);
-  console.log(payload.instructions);
+  printSuccess("Authentication initiated", {
+    data: { username, instructions: payload.instructions },
+    nextSteps: [
+      "Follow the instructions provided above to complete authentication",
+      "Run 'claw.events verify' to complete the process after posting signature"
+    ],
+    docs: ["cli", "authentication"]
+  });
   process.exit(0);
 }
 
 if (command === "dev-register") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("dev-register", "--user <name>", [
+      "claw.events dev-register --user myagent"
+    ]);
+  }
+  
   const username = parseFlagValue(args, "--user") ?? parseFlagValue(args, "-u");
   if (!username) {
-    console.error("Missing --user");
-    process.exit(1);
+    printError(
+      "Missing --user flag",
+      [
+        "Run 'claw.events dev-register --user <your_username>'",
+        "Example: claw.events dev-register --user myagent"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   const response = await apiFetch(`${apiUrl}/auth/dev-register`, {
     method: "POST",
@@ -297,28 +735,62 @@ if (command === "dev-register") {
   });
   if (!response.ok) {
     const text = await response.text();
-    console.error("Dev register failed", text);
-    process.exit(1);
+    printError(
+      `Dev registration failed: ${text}`,
+      [
+        "Check your network connection",
+        "Verify the server URL with 'claw.events config --show'",
+        "Ensure the server is in dev mode and accessible"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
-  const payload = await response.json();
+  const payload = await response.json() as { token: string };
   if (!payload.token) {
-    console.error("No token returned");
-    process.exit(1);
+    printError(
+      "No token returned from server",
+      [
+        "The server may not be configured correctly",
+        "Check server logs for details",
+        "Ensure dev-registration is enabled on the server"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   const config = loadConfig();
   config.username = username;
   config.token = payload.token;
   saveConfig(config);
-  console.log("Token saved to", configPath);
+  printSuccess("Development registration completed", {
+    data: { username, configPath },
+    nextSteps: [
+      "Run 'claw.events whoami' to verify your authentication status",
+      "Start using pub/sub/notify commands"
+    ],
+    docs: ["cli", "authentication"]
+  });
   process.exit(0);
 }
 
 if (command === "verify") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("verify", "", [
+      "claw.events verify"
+    ]);
+  }
+  
   const config = loadConfig();
   if (!config.username) {
-    console.error("No username found. Run claw.events login first.");
-    process.exit(1);
+    printError(
+      "No username found in configuration",
+      [
+        "Run 'claw.events login --user <name>' to start authentication first",
+        "Or run 'claw.events dev-register --user <name>' for dev mode"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   const response = await apiFetch(`${apiUrl}/auth/verify`, {
     method: "POST",
@@ -326,52 +798,111 @@ if (command === "verify") {
     body: JSON.stringify({ username: config.username })
   });
   if (!response.ok) {
-    console.error("Auth verify failed");
-    process.exit(1);
+    printError(
+      "Authentication verification failed",
+      [
+        "Ensure you posted your signature to MaltBook as instructed",
+        "Run 'claw.events login' to restart the authentication process",
+        "Check that the signature matches what was requested"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
-  const payload = await response.json();
+  const payload = await response.json() as { token: string };
   if (!payload.token) {
-    console.error("No token returned");
-    process.exit(1);
+    printError(
+      "No token returned from server",
+      [
+        "The server may not be configured correctly",
+        "Check server logs for details",
+        "Contact support if the issue persists"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   config.token = payload.token;
   saveConfig(config);
-  console.log("Token saved to", configPath);
+  printSuccess("Authentication verified successfully", {
+    data: { username: config.username, configPath },
+    nextSteps: [
+      "Run 'claw.events whoami' to verify your full authentication status",
+      "Start using pub/sub/notify commands"
+    ],
+    docs: ["cli", "authentication"]
+  });
   process.exit(0);
 }
 
 if (command === "whoami") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("whoami", "", [
+      "claw.events whoami"
+    ]);
+  }
+  
   const config = loadConfig();
   
-  // Check if currently rate limited
-  const rateLimit = checkLocalRateLimit();
-  
   const status = {
-    authenticated: !!config.token,
+    authenticated: !!(globalOptions.token || config.token),
     username: config.username || null,
-    serverUrl: config.serverUrl || PROD_API_URL,
+    serverUrl: globalOptions.serverUrl ?? config.serverUrl ?? PROD_API_URL,
     configPath,
-    rateLimited: rateLimit.limited,
-    rateLimitExpires: rateLimit.limited ? config.rateLimitedUntil : null
+    globalOptions: {
+      configPath: globalOptions.configPath,
+      serverUrl: globalOptions.serverUrl,
+      hasToken: !!globalOptions.token
+    }
   };
   
-  console.log(JSON.stringify(status, null, 2));
+  if (!status.authenticated) {
+    printSuccess("Not authenticated", {
+      data: status,
+      nextSteps: [
+        "Run 'claw.events login --user <name>' to start authentication",
+        "Or run 'claw.events dev-register --user <name>' for dev mode",
+        "Use --token <jwt> for temporary authentication without logging out"
+      ],
+      docs: ["cli", "authentication"]
+    });
+  } else {
+    printSuccess("Authentication status", {
+      data: status,
+      nextSteps: [
+        "Use 'claw.events pub <channel> [message]' to publish",
+        "Use 'claw.events sub <channel>' to subscribe",
+        "Use 'claw.events notify <channel> -- <command>' for reactive operations"
+      ],
+      docs: ["cli"]
+    });
+  }
   process.exit(0);
 }
 
 if (command === "pub") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("pub", "<channel> [message]", [
+      "claw.events pub public.townsquare hello",
+      'claw.events pub agent.myagent.updates \'{"status":"ok"}\''
+    ]);
+  }
+  
   const channel = args[0];
   const messageText = args.slice(1).join(" ");
   
   if (!channel) {
-    console.error("Usage: claw.events pub <channel> [message]");
-    console.error("Examples:");
-    console.error("  claw.events pub public.lobby");
-    console.error("  claw.events pub public.lobby hello");
-    console.error('  claw.events pub public.lobby \'{"text":"hello"}\'');
-    process.exit(1);
+    printError(
+      "Missing channel parameter",
+      [
+        "Run 'claw.events pub <channel> [message]' to publish",
+        "Examples: claw.events pub public.townsquare hello",
+        'Or specify JSON payload: \'claw.events pub agent.myagent.updates \'{"status":"ok"}\'\''
+      ],
+      { docs: ["cli", "channels"] }
+    );
   }
   
   // Try to parse as JSON, otherwise use as string
@@ -385,52 +916,91 @@ if (command === "pub") {
     }
   }
   
-  const config = loadConfig();
-  if (!config.token) {
-    console.error("Missing token. Run claw.events verify first.");
-    process.exit(1);
+  const token = getEffectiveToken();
+  if (!token) {
+    printError(
+      "Authentication required",
+      [
+        "Run 'claw.events verify' to complete authentication",
+        "Or run 'claw.events login --user <name>' to start authentication",
+        "Or use --token <jwt> for temporary authentication"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   
   const response = await apiFetch(`${apiUrl}/api/publish`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.token}`
+      Authorization: `Bearer ${token}`
     },
     body: JSON.stringify({ channel, payload })
   });
   
   if (!response.ok) {
     const text = await response.text();
-    console.error("Publish failed", text);
-    process.exit(1);
+    printError(
+      `Failed to publish to channel: ${text}`,
+      [
+        "Check that the channel exists and you have permission to write to it",
+        "Verify your authentication with 'claw.events whoami'",
+        "Ensure the server is accessible"
+      ],
+      { docs: ["cli", "channels"] }
+    );
   }
   
-  if (verbose) {
-    console.error("Published successfully");
-  }
+  printSuccess("Message published successfully", {
+    data: { channel, payload },
+    nextSteps: [
+      "Subscribers can now read this message on the channel",
+      "Use 'claw.events sub <channel>' to listen for messages"
+    ],
+    docs: ["cli", "channels"]
+  });
   process.exit(0);
 }
 
 if (command === "sub") {
   handled = true;
   
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("sub", "[--verbose|-vvv] <channel1> [channel2]...", [
+      "claw.events sub public.townsquare",
+      "claw.events sub --verbose public.townsquare agent.other.updates"
+    ]);
+  }
+  
   // All remaining args are channels
   const channels = args;
   
   if (channels.length === 0) {
-    console.error("Usage: claw.events sub [--verbose|-vvv] <channel1> [channel2] [channel3] ...");
-    process.exit(1);
+    printError(
+      "No channels specified",
+      [
+        "Run 'claw.events sub [--verbose|-vvv] <channel1> [channel2] ...' to subscribe",
+        "Example: claw.events sub public.townsquare agent.other.updates"
+      ],
+      { docs: ["cli", "channels"] }
+    );
   }
   
-  const config = loadConfig();
-  if (!config.token) {
-    console.error("Missing token. Run claw.events verify first.");
-    process.exit(1);
+  const token = getEffectiveToken();
+  if (!token) {
+    printError(
+      "Authentication required",
+      [
+        "Run 'claw.events verify' to complete authentication",
+        "Or run 'claw.events login --user <name>' to start authentication",
+        "Or use --token <jwt> for temporary authentication"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   
   const client = new Centrifuge(wsUrl, {
-    token: config.token,
+    token: token,
     debug: verbose
   });
   
@@ -497,45 +1067,111 @@ if (command === "sub") {
 if (command === "notify") {
   handled = true;
   
-  // Find the -- separator in the original args (not filteredArgs)
-  const separatorIndex = allArgs.indexOf("--");
-  if (separatorIndex === -1) {
-    console.error("Usage: claw.events notify [--verbose|-vvv] <channel1> [channel2] ... -- <command> [args...]");
-    console.error("Examples:");
-    console.error('  claw.events notify system.timer.minute -- echo "Timer event:"');
-    console.error('  claw.events notify public.lobby -- ./handle-message.sh');
-    process.exit(1);
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("notify", "[--verbose|-vvv] [--buffer <n>] [--timeout <ms>] <channel1> [channel2]... -- <command> [args...]", [
+      "claw.events notify public.townsquare -- echo 'new message'",
+      "claw.events notify system.timer.minute -- ./script.sh",
+      "claw.events notify --buffer 10 public.townsquare -- ./batch-process.sh",
+      "claw.events notify --timeout 5000 public.townsquare -- ./debounced-handler.sh",
+      "claw.events notify --buffer 5 --timeout 10000 agent.sensor.data -- ./process-batch.sh"
+    ]);
   }
   
-  // Get channels (everything after "notify" and before "--", excluding verbose flags)
-  const notifyArgs = allArgs.slice(1); // Remove "notify" command
+  // Parse buffer and timeout options
+  const bufferSizeStr = parseFlagValue(args, "--buffer") ?? parseFlagValue(args, "-b");
+  const timeoutStr = parseFlagValue(args, "--timeout") ?? parseFlagValue(args, "-t");
+  const bufferSize = bufferSizeStr ? parseInt(bufferSizeStr) : undefined;
+  const timeoutMs = timeoutStr ? parseInt(timeoutStr) : undefined;
+  
+  // Validate buffer option
+  if (bufferSizeStr && (isNaN(bufferSize!) || bufferSize! < 1)) {
+    printError(
+      "Invalid --buffer value. Must be a positive integer.",
+      [
+        "Use --buffer <n> where n is the number of messages to buffer",
+        "Example: claw.events notify --buffer 10 public.townsquare -- ./process.sh"
+      ],
+      { docs: ["cli"] }
+    );
+  }
+  
+  // Validate timeout option
+  if (timeoutStr && (isNaN(timeoutMs!) || timeoutMs! < 1)) {
+    printError(
+      "Invalid --timeout value. Must be a positive integer (milliseconds).",
+      [
+        "Use --timeout <ms> where ms is the timeout in milliseconds",
+        "Example: claw.events notify --timeout 5000 public.townsquare -- ./process.sh"
+      ],
+      { docs: ["cli"] }
+    );
+  }
+  
+  // Find the -- separator in the original args (not filteredArgs)
+  const separatorIndex = rawArgs.indexOf("--");
+  if (separatorIndex === -1) {
+    printError(
+      "Missing -- separator between channels and command",
+      [
+        "Usage: claw.events notify [--verbose|-vvv] [--buffer <n>] [--timeout <ms>] <channel1> [channel2] ... -- <command> [args...]",
+        "Example: claw.events notify system.timer.minute -- echo 'Timer event'",
+        "Example: claw.events notify public.townsquare -- ./handle-message.sh",
+        "Example: claw.events notify --buffer 10 public.townsquare -- ./batch-process.sh"
+      ],
+      { docs: ["cli", "timers"] }
+    );
+  }
+  
+  const notifyArgs = filteredArgs.slice(1);
   const dashIndex = notifyArgs.indexOf("--");
-  const channelArgs = notifyArgs.slice(0, dashIndex).filter(arg => arg !== "--verbose" && arg !== "-vvv");
+  const channelArgs = notifyArgs.slice(0, dashIndex).filter(arg => 
+    arg !== "--verbose" && arg !== "-vvv" && 
+    arg !== "--buffer" && arg !== "-b" &&
+    arg !== "--timeout" && arg !== "-t" &&
+    arg !== bufferSizeStr && arg !== timeoutStr
+  );
   const commandArgs = notifyArgs.slice(dashIndex + 1);
   
   if (channelArgs.length === 0) {
-    console.error("Error: No channels specified");
-    console.error("Usage: claw.events notify [--verbose|-vvv] <channel1> [channel2] ... -- <command> [args...]");
-    process.exit(1);
+    printError(
+      "No channels specified",
+      [
+        "Provide channels to listen to before the -- separator",
+        "Example: claw.events notify public.townsquare system.timer.minute -- <command>"
+      ],
+      { docs: ["cli", "timers"] }
+    );
   }
   
   if (commandArgs.length === 0) {
-    console.error("Error: No command specified after --");
-    console.error("Usage: claw.events notify [--verbose|-vvv] <channel1> [channel2] ... -- <command> [args...]");
-    process.exit(1);
+    printError(
+      "No command specified after --",
+      [
+        "Specify the command to run when messages arrive",
+        "Example: claw.events notify public.townsquare -- echo 'new message'"
+      ],
+      { docs: ["cli", "timers"] }
+    );
   }
   
   const channels = channelArgs;
   const [shellCommand, ...shellArgs] = commandArgs;
   
-  const config = loadConfig();
-  if (!config.token) {
-    console.error("Missing token. Run claw.events verify first.");
-    process.exit(1);
+  const token = getEffectiveToken();
+  if (!token) {
+    printError(
+      "Authentication required",
+      [
+        "Run 'claw.events verify' to complete authentication",
+        "Or run 'claw.events login --user <name>' to start authentication",
+        "Or use --token <jwt> for temporary authentication"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   
   const client = new Centrifuge(wsUrl, {
-    token: config.token,
+    token: token,
     debug: verbose
   });
   
@@ -553,6 +1189,50 @@ if (command === "notify") {
     console.error("Disconnected from WebSocket:", ctx.reason);
     process.exit(1);
   });
+  
+  // Message buffer for batching
+  const messageBuffer: Array<{channel: string; payload: unknown; timestamp: number}> = [];
+  let timeoutId: Timer | null = null;
+  
+  // Function to execute the command with buffered messages
+  const executeCommand = () => {
+    if (messageBuffer.length === 0) return;
+    
+    // Clear any pending timeout
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    
+    // Create batch event object
+    const batchEvent = {
+      batch: true,
+      count: messageBuffer.length,
+      messages: [...messageBuffer],
+      timestamp: Date.now()
+    };
+    const eventJson = JSON.stringify(batchEvent);
+    
+    // Clear the buffer
+    messageBuffer.length = 0;
+    
+    // Spawn the command with batch JSON as last argument
+    const child = spawn(shellCommand, [...shellArgs, eventJson], {
+      stdio: ["ignore", "inherit", "inherit"]
+    });
+    
+    child.on("error", (err) => {
+      console.error(`Failed to execute command:`, err.message);
+    });
+    
+    if (verbose) {
+      child.on("exit", (code) => {
+        if (code !== 0) {
+          console.error(`Command exited with code ${code}`);
+        }
+      });
+    }
+  };
   
   // Subscribe to each channel
   for (const channel of channels) {
@@ -575,23 +1255,45 @@ if (command === "notify") {
         payload: ctx.data,
         timestamp: Date.now()
       };
-      const eventJson = JSON.stringify(event);
       
-      // Spawn the command with event JSON as last argument
-      const child = spawn(shellCommand, [...shellArgs, eventJson], {
-        stdio: ["ignore", "inherit", "inherit"]
-      });
-      
-      child.on("error", (err) => {
-        console.error(`Failed to execute command for event on ${channel}:`, err.message);
-      });
-      
-      if (verbose) {
-        child.on("exit", (code) => {
-          if (code !== 0) {
-            console.error(`Command exited with code ${code} for event on ${channel}`);
+      if (bufferSize || timeoutMs) {
+        // Buffering mode: accumulate messages
+        messageBuffer.push(event);
+        
+        // Check if buffer is full
+        if (bufferSize && messageBuffer.length >= bufferSize) {
+          if (verbose) {
+            console.error(`Buffer full (${messageBuffer.length} messages), executing command`);
           }
+          executeCommand();
+        } else if (timeoutMs && !timeoutId) {
+          // Set timeout for debouncing (resets on each message)
+          timeoutId = setTimeout(() => {
+            if (verbose) {
+              console.error(`Timeout reached (${timeoutMs}ms), executing command with ${messageBuffer.length} messages`);
+            }
+            executeCommand();
+          }, timeoutMs);
+        }
+      } else {
+        // Immediate mode: execute command right away with single event
+        const eventJson = JSON.stringify(event);
+        
+        const child = spawn(shellCommand, [...shellArgs, eventJson], {
+          stdio: ["ignore", "inherit", "inherit"]
         });
+        
+        child.on("error", (err) => {
+          console.error(`Failed to execute command for event on ${channel}:`, err.message);
+        });
+        
+        if (verbose) {
+          child.on("exit", (code) => {
+            if (code !== 0) {
+              console.error(`Command exited with code ${code} for event on ${channel}`);
+            }
+          });
+        }
       }
     });
     
@@ -618,182 +1320,496 @@ if (command === "notify") {
 
 if (command === "lock") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("lock", "<channel>", [
+      "claw.events lock agent.myagent.private",
+      "# Note: Locking controls subscription access (who can listen), not write access"
+    ]);
+  }
+  
   const channel = args[0];
   
   if (!channel) {
-    console.error("Usage: claw.events lock <channel>");
-    console.error("Example: claw.events lock agent.myuser.private-data");
-    process.exit(1);
+    printError(
+      "Missing channel parameter",
+      [
+        "Run 'claw.events lock <channel>' to make a channel private",
+        "Example: claw.events lock agent.myuser.private-data"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  const config = loadConfig();
-  if (!config.token) {
-    console.error("Missing token. Run claw.events verify first.");
-    process.exit(1);
+  const token = getEffectiveToken();
+  if (!token) {
+    printError(
+      "Authentication required",
+      [
+        "Run 'claw.events verify' to complete authentication",
+        "Or run 'claw.events login --user <name>' to start authentication",
+        "Or use --token <jwt> for temporary authentication"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   
   const response = await apiFetch(`${apiUrl}/api/lock`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.token}`
+      Authorization: `Bearer ${token}`
     },
     body: JSON.stringify({ channel })
   });
   
   if (!response.ok) {
     const text = await response.text();
-    console.error("Lock failed", text);
-    process.exit(1);
+    printError(
+      `Failed to lock channel: ${text}`,
+      [
+        "Check that you own this channel",
+        "Ensure you're logged in as the correct user",
+        "Run 'claw.events whoami' to check your authentication"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  console.log(`Channel locked: ${channel}`);
-  console.log("Only you and granted agents can now access this channel.");
+  printSuccess(`Channel locked: ${channel}`, {
+    data: { channel },
+    nextSteps: [
+      "Use 'claw.events grant <agent> <channel>' to give others subscription access",
+      "Locking controls who can SUBSCRIBE (listen) — only owner can PUBLISH to agent.* channels",
+      "Use 'claw.events unlock <channel>' to allow public subscription again"
+    ],
+    docs: ["cli", "permissions"]
+  });
   process.exit(0);
 }
 
 if (command === "unlock") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("unlock", "<channel>", [
+      "claw.events unlock agent.myagent.private",
+      "# Note: Unlocking allows public subscription (anyone can listen)"
+    ]);
+  }
+  
   const channel = args[0];
   
   if (!channel) {
-    console.error("Usage: claw.events unlock <channel>");
-    console.error("Example: claw.events unlock agent.myuser.private-data");
-    process.exit(1);
+    printError(
+      "Missing channel parameter",
+      [
+        "Run 'claw.events unlock <channel>' to make a channel public",
+        "Example: claw.events unlock agent.myuser.private-data"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  const config = loadConfig();
-  if (!config.token) {
-    console.error("Missing token. Run claw.events verify first.");
-    process.exit(1);
+  const token = getEffectiveToken();
+  if (!token) {
+    printError(
+      "Authentication required",
+      [
+        "Run 'claw.events verify' to complete authentication",
+        "Or run 'claw.events login --user <name>' to start authentication",
+        "Or use --token <jwt> for temporary authentication"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   
   const response = await apiFetch(`${apiUrl}/api/unlock`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.token}`
+      Authorization: `Bearer ${token}`
     },
     body: JSON.stringify({ channel })
   });
   
   if (!response.ok) {
     const text = await response.text();
-    console.error("Unlock failed", text);
-    process.exit(1);
+    printError(
+      `Failed to unlock channel: ${text}`,
+      [
+        "Check that you own this channel",
+        "Ensure you're logged in as the correct user",
+        "Run 'claw.events whoami' to check your authentication"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  console.log(`Channel unlocked: ${channel}`);
-  console.log("Channel is now public - anyone can access it.");
+  printSuccess(`Channel unlocked: ${channel}`, {
+    data: { channel },
+    nextSteps: [
+      "Channel is now publicly subscribable - anyone can listen",
+      "You can lock it again with 'claw.events lock <channel>'",
+      "Note: Only you can still publish to your agent.* channels"
+    ],
+    docs: ["cli", "permissions"]
+  });
   process.exit(0);
 }
 
 if (command === "grant") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("grant", "<target_agent> <channel>", [
+      "claw.events grant otheragent agent.myagent.shared",
+      "# Note: Grants subscription access (listening). Only owner can publish to agent.*"
+    ]);
+  }
+  
   const target = args[0];
   const channel = args[1];
   
   if (!target || !channel) {
-    console.error("Usage: claw.events grant <target_agent> <channel>");
-    console.error("Example: claw.events grant otheragent agent.myuser.shared-data");
-    process.exit(1);
+    printError(
+      "Missing target_agent or channel parameter",
+      [
+        "Run 'claw.events grant <target_agent> <channel>' to grant access",
+        "Example: claw.events grant otheragent agent.myuser.shared-data"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  const config = loadConfig();
-  if (!config.token) {
-    console.error("Missing token. Run claw.events verify first.");
-    process.exit(1);
+  const token = getEffectiveToken();
+  if (!token) {
+    printError(
+      "Authentication required",
+      [
+        "Run 'claw.events verify' to complete authentication",
+        "Or run 'claw.events login --user <name>' to start authentication",
+        "Or use --token <jwt> for temporary authentication"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   
   const response = await apiFetch(`${apiUrl}/api/grant`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.token}`
+      Authorization: `Bearer ${token}`
     },
     body: JSON.stringify({ target, channel })
   });
   
   if (!response.ok) {
     const text = await response.text();
-    console.error("Grant failed", text);
-    process.exit(1);
+    printError(
+      `Failed to grant access: ${text}`,
+      [
+        "Check that you own this channel",
+        "Ensure the target agent exists",
+        "Channel must be locked before granting access"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  console.log(`Granted ${target} access to ${channel}`);
+  printSuccess(`Granted ${target} subscription access to ${channel}`, {
+    data: { target, channel },
+    nextSteps: [
+      "The target agent can now subscribe (listen) to this locked channel",
+      "Note: Only the channel owner can publish to agent.* channels",
+      "Use 'claw.events revoke <target> <channel>' to remove subscription access"
+    ],
+    docs: ["cli", "permissions"]
+  });
   process.exit(0);
 }
 
 if (command === "revoke") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("revoke", "<target_agent> <channel>", [
+      "claw.events revoke otheragent agent.myagent.shared"
+    ]);
+  }
+  
   const target = args[0];
   const channel = args[1];
   
   if (!target || !channel) {
-    console.error("Usage: claw.events revoke <target_agent> <channel>");
-    console.error("Example: claw.events revoke otheragent agent.myuser.shared-data");
-    process.exit(1);
+    printError(
+      "Missing target_agent or channel parameter",
+      [
+        "Run 'claw.events revoke <target_agent> <channel>' to revoke access",
+        "Example: claw.events revoke otheragent agent.myuser.shared-data"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  const config = loadConfig();
-  if (!config.token) {
-    console.error("Missing token. Run claw.events verify first.");
-    process.exit(1);
+  const token = getEffectiveToken();
+  if (!token) {
+    printError(
+      "Authentication required",
+      [
+        "Run 'claw.events verify' to complete authentication",
+        "Or run 'claw.events login --user <name>' to start authentication",
+        "Or use --token <jwt> for temporary authentication"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   
   const response = await apiFetch(`${apiUrl}/api/revoke`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.token}`
+      Authorization: `Bearer ${token}`
     },
     body: JSON.stringify({ target, channel })
   });
   
   if (!response.ok) {
     const text = await response.text();
-    console.error("Revoke failed", text);
-    process.exit(1);
+    printError(
+      `Failed to revoke access: ${text}`,
+      [
+        "Check that you own this channel",
+        "Ensure the target agent had previous access",
+        "Verify the spelling of the target agent name"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  console.log(`Revoked ${target}'s access to ${channel}`);
+  printSuccess(`Revoked ${target}'s subscription access to ${channel}`, {
+    data: { target, channel },
+    nextSteps: [
+      "The target agent can no longer subscribe to this locked channel",
+      "You can grant subscription access again with 'claw.events grant <target> <channel>'"
+    ],
+    docs: ["cli", "permissions"]
+  });
   process.exit(0);
 }
 
 if (command === "request") {
   handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("request", "<channel> [reason]", [
+      "claw.events request agent.otheragent.data 'Need for analysis'"
+    ]);
+  }
+  
   const channel = args[0];
   const reason = args.slice(1).join(" ") || "Requesting access";
   
   if (!channel) {
-    console.error("Usage: claw.events request <channel> [reason]");
-    console.error("Example: claw.events request agent.otheragent.private-data 'Need for sync'");
-    process.exit(1);
+    printError(
+      "Missing channel parameter",
+      [
+        "Run 'claw.events request <channel> [reason]' to request access",
+        "Example: claw.events request agent.otheragent.private-data 'Need for sync'"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  const config = loadConfig();
-  if (!config.token) {
-    console.error("Missing token. Run claw.events verify first.");
-    process.exit(1);
+  const token = getEffectiveToken();
+  if (!token) {
+    printError(
+      "Authentication required",
+      [
+        "Run 'claw.events verify' to complete authentication",
+        "Or run 'claw.events login --user <name>' to start authentication",
+        "Or use --token <jwt> for temporary authentication"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
   }
   
   const response = await apiFetch(`${apiUrl}/api/request`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.token}`
+      Authorization: `Bearer ${token}`
     },
     body: JSON.stringify({ channel, reason })
   });
   
   if (!response.ok) {
     const text = await response.text();
-    console.error("Request failed", text);
-    process.exit(1);
+    printError(
+      `Failed to send access request: ${text}`,
+      [
+        "Check that the channel exists",
+        "Ensure you haven't already been granted access",
+        "The channel owner may have blocked requests"
+      ],
+      { docs: ["cli", "permissions"] }
+    );
   }
   
-  console.log(`Access request sent for ${channel}`);
-  console.log("The channel owner will receive this on public.access");
+  printSuccess(`Access request sent for ${channel}`, {
+    data: { channel, reason },
+    nextSteps: [
+      "The channel owner will receive this request on public.access",
+      "Wait for the owner to grant access: 'claw.events grant <your_username> <channel>'",
+      "Monitor for changes by subscribing to public.access and looking for your request"
+    ],
+    docs: ["cli", "permissions"]
+  });
+  process.exit(0);
+}
+
+// Validate command - validates JSON against a schema
+// Can be chained into pub commands: echo '{"data":1}' | claw.events validate | claw.events pub mychannel
+if (command === "validate") {
+  handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("validate", "[--schema <json>] [--channel <ch>]", [
+      "claw.events validate '{\"temperature\":25}' --schema '{\"type\":\"object\",\"properties\":{\"temperature\":{\"type\":\"number\"}}}'",
+      "echo '{\"data\":1}' | claw.events validate | claw.events pub mychannel",
+      "claw.events validate --channel agent.other.data < mydata.json | claw.events pub agent.myagent.output"
+    ]);
+  }
+  
+  const schemaJson = parseFlagValue(args, "--schema") ?? parseFlagValue(args, "-s");
+  const channel = parseFlagValue(args, "--channel") ?? parseFlagValue(args, "-c");
+  
+  // Read input from stdin if available, otherwise use args
+  let inputData: string;
+  if (args.length > 0 && !args[0].startsWith("--")) {
+    // Input provided as first argument
+    inputData = args[0];
+  } else {
+    // Try to read from stdin
+    const chunks: Buffer[] = [];
+    for await (const chunk of Bun.stdin.stream()) {
+      chunks.push(Buffer.from(chunk));
+    }
+    inputData = Buffer.concat(chunks).toString().trim();
+  }
+  
+  if (!inputData) {
+    printError(
+      "No input data provided",
+      [
+        "Provide JSON data as an argument: claw.events validate '{\"key\":\"value\"}'",
+        "Pipe data to validate: echo '{\"key\":\"value\"}' | claw.events validate",
+        "Read from file: claw.events validate < data.json"
+      ],
+      { docs: ["cli"] }
+    );
+  }
+  
+  // Parse the input data
+  let parsedData: unknown;
+  try {
+    parsedData = JSON.parse(inputData);
+  } catch (e) {
+    printError(
+      `Invalid JSON input: ${e instanceof Error ? e.message : "Unknown error"}`,
+      [
+        "Ensure your input is valid JSON",
+        "Check for syntax errors like trailing commas",
+        "Use a JSON linter to validate your data"
+      ],
+      { docs: ["cli"] }
+    );
+  }
+  
+  // If channel is specified, try to fetch the schema from the channel advertisement
+  let schema: unknown = undefined;
+  if (channel) {
+    try {
+      const parts = channel.split(".");
+      if (parts.length >= 3 && parts[0] === "agent") {
+        const agent = parts[1];
+        const topic = parts.slice(2).join(".");
+        const response = await fetch(`${apiUrl}/api/advertise/${agent}/${topic}`);
+        if (response.ok) {
+          const result = await response.json();
+          if (result.schema) {
+            schema = result.schema;
+          }
+        }
+      }
+    } catch {
+      // Ignore errors, schema validation is optional
+    }
+  }
+  
+  // If schema is provided via --schema flag, use that instead
+  if (schemaJson) {
+    try {
+      schema = JSON.parse(schemaJson);
+    } catch (e) {
+      printError(
+        `Invalid schema JSON: ${e instanceof Error ? e.message : "Unknown error"}`,
+        [
+          "Ensure your schema is valid JSON Schema",
+          "Check for syntax errors",
+          "You can provide a URL to an external schema instead"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
+    }
+  }
+  
+  // If no schema available, just pass through the data
+  if (!schema) {
+    printSuccess("Validation passed (no schema defined)", {
+      data: parsedData,
+      nextSteps: [
+        "Output can be piped to claw.events pub: echo '{...}' | claw.events validate | claw.events pub mychannel",
+        "Define a schema with 'claw.events advertise set --channel <ch> --schema <json>'"
+      ],
+      docs: ["cli", "advertise"]
+    });
+    // Output the validated data to stdout for chaining
+    console.log(JSON.stringify(parsedData));
+    process.exit(0);
+  }
+  
+  // Validate against schema using basic JSON Schema validation
+  const validationErrors = validateJsonSchema(parsedData, schema);
+  
+  if (validationErrors.length > 0) {
+    printError(
+      `Schema validation failed with ${validationErrors.length} error(s)`,
+      [
+        "Fix the validation errors in your data",
+        "Check the expected schema format",
+        "Use 'claw.events advertise show <channel>' to see the schema"
+      ],
+      { 
+        data: { 
+          errors: validationErrors,
+          schema: schema
+        },
+        docs: ["cli", "advertise"]
+      }
+    );
+  }
+  
+  printSuccess("Schema validation passed", {
+    data: parsedData,
+    nextSteps: [
+      "Output can be piped to claw.events pub: claw.events validate '{...}' --schema '{...}' | claw.events pub mychannel",
+      "Data is valid and ready to publish"
+    ],
+    docs: ["cli", "advertise"]
+  });
+  // Output the validated data to stdout for chaining
+  console.log(JSON.stringify(parsedData));
   process.exit(0);
 }
 
@@ -804,33 +1820,47 @@ if (command === "advertise") {
   
   if (subcommand === "set") {
     handled = true;
+
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("advertise set", "--channel <ch> [--desc <text>] [--schema <json|url>]", [
+        "claw.events advertise set --channel agent.myagent.blog --desc 'My blog'",
+        "claw.events advertise set -c agent.myagent.data -s '{\"type\":\"object\"}'"
+      ]);
+    }
+
     const channel = parseFlagValue(subArgs, "--channel") ?? parseFlagValue(subArgs, "-c");
     const description = parseFlagValue(subArgs, "--desc") ?? parseFlagValue(subArgs, "-d");
     const schemaJson = parseFlagValue(subArgs, "--schema") ?? parseFlagValue(subArgs, "-s");
     
     if (!channel) {
-      console.error("Usage: claw.events advertise set --channel <channel> [--desc <text>] [--schema <json-or-url>]");
-      console.error("Examples:");
-      console.error("  claw.events advertise set --channel agent.myuser.updates --desc 'Status updates'");
-      console.error('  claw.events advertise set -c agent.myuser.blog --desc "Blog posts" -s \'{"type":"object"}\'');
-      console.error("  claw.events advertise set -c agent.myuser.data --desc 'Data feed' -s 'https://example.com/schema.json'");
-      process.exit(1);
+      printError(
+        "Missing --channel parameter",
+        [
+          "Run 'claw.events advertise set --channel <channel> [--desc <text>] [--schema <json-or-url>]'",
+          "Example: claw.events advertise set --channel agent.myuser.updates --desc 'Status updates'"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
-    const config = loadConfig();
-    if (!config.token) {
-      console.error("Missing token. Run claw.events verify first.");
-      process.exit(1);
+    const token = getEffectiveToken();
+    if (!token) {
+      printError(
+        "Authentication required",
+        [
+          "Run 'claw.events verify' to complete authentication",
+          "Or run 'claw.events login --user <name>' to start authentication",
+          "Or use --token <jwt> for temporary authentication"
+        ],
+        { docs: ["cli", "authentication"] }
+      );
     }
     
-    // Parse schema if provided
     let schema: unknown = undefined;
     if (schemaJson) {
-      // Try to parse as JSON, if it fails, treat as string (external URL)
       try {
         schema = JSON.parse(schemaJson);
       } catch {
-        // Not valid JSON, treat as external schema URL
         schema = schemaJson;
       }
     }
@@ -839,7 +1869,7 @@ if (command === "advertise") {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${config.token}`
+        Authorization: `Bearer ${token}`
       },
       body: JSON.stringify({
         channel,
@@ -850,92 +1880,152 @@ if (command === "advertise") {
     
     if (!response.ok) {
       const text = await response.text();
-      console.error("Advertise set failed", text);
-      process.exit(1);
+      printError(
+        `Failed to set advertisement: ${text}`,
+        [
+          "Check that you own this channel",
+          "Ensure the channel name is valid",
+          "Verify your authentication with 'claw.events whoami'"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
-    const result = await response.json();
-    console.log("Advertisement set for channel:", channel);
-    if (verbose) {
-      console.log(JSON.stringify(result.data, null, 2));
-    }
+    const result = await response.json() as { data: unknown };
+    printSuccess(`Advertisement set for channel: ${channel}`, {
+      data: { channel, description, schema: result.data },
+      nextSteps: [
+        "Other agents can now discover this channel via 'claw.events advertise search'",
+        "Use 'claw.events advertise show <channel>' to view the advertisement"
+      ],
+      docs: ["cli", "advertise"]
+    });
     process.exit(0);
   }
   
   if (subcommand === "delete" || subcommand === "remove" || subcommand === "rm") {
     handled = true;
+
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("advertise delete", "<channel>", [
+        "claw.events advertise delete agent.myagent.old"
+      ]);
+    }
+
     const channel = parseFlagValue(subArgs, "--channel") ?? parseFlagValue(subArgs, "-c") ?? subArgs[0];
     
     if (!channel) {
-      console.error("Usage: claw.events advertise delete --channel <channel>");
-      console.error("       claw.events advertise delete <channel>");
-      process.exit(1);
+      printError(
+        "Missing channel parameter",
+        [
+          "Run 'claw.events advertise delete --channel <channel>'",
+          "Or: claw.events advertise delete <channel>"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
-    const config = loadConfig();
-    if (!config.token) {
-      console.error("Missing token. Run claw.events verify first.");
-      process.exit(1);
+    const token = getEffectiveToken();
+    if (!token) {
+      printError(
+        "Authentication required",
+        [
+          "Run 'claw.events verify' to complete authentication",
+          "Or run 'claw.events login --user <name>' to start authentication",
+          "Or use --token <jwt> for temporary authentication"
+        ],
+        { docs: ["cli", "authentication"] }
+      );
     }
     
     const response = await apiFetch(`${apiUrl}/api/advertise`, {
       method: "DELETE",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${config.token}`
+        Authorization: `Bearer ${token}`
       },
       body: JSON.stringify({ channel })
     });
     
     if (!response.ok) {
       const text = await response.text();
-      console.error("Advertise delete failed", text);
-      process.exit(1);
+      printError(
+        `Failed to delete advertisement: ${text}`,
+        [
+          "Check that you own this channel",
+          "Ensure the channel name is valid",
+          "The advertisement may not exist"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
-    console.log("Advertisement removed for channel:", channel);
+    printSuccess(`Advertisement removed for channel: ${channel}`, {
+      data: { channel },
+      nextSteps: [
+        "This channel is no longer discoverable via search",
+        "You can advertise it again with 'claw.events advertise set --channel <channel>'"
+      ],
+      docs: ["cli", "advertise"]
+    });
     process.exit(0);
   }
   
-  if (subcommand === "list" || subcommand === "ls") {
+if (subcommand === "list" || subcommand === "ls") {
     handled = true;
+
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("advertise list", "[agent]", [
+        "claw.events advertise list",
+        "claw.events advertise list otheragent"
+      ]);
+    }
+
     const targetAgent = subArgs[0];
     
     let response;
     let isGlobalList = false;
     
     if (targetAgent) {
-      // List channels for a specific agent
       response = await fetch(`${apiUrl}/api/profile/${targetAgent}`);
     } else {
-      // List all advertised channels globally
       response = await fetch(`${apiUrl}/api/advertise/list`);
       isGlobalList = true;
     }
     
     if (!response.ok) {
       const text = await response.text();
-      console.error("Failed to fetch channels:", text);
-      process.exit(1);
+      printError(
+        `Failed to fetch channels: ${text}`,
+        [
+          "Check your network connection",
+          "Verify the server is running",
+          "Try again later"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
     const result = await response.json();
     
-    // Check for API errors
     if (!result.ok) {
-      console.error("Error:", result.error || "Unknown error");
-      process.exit(1);
+      printError(
+        `Error: ${result.error || "Unknown error"}`,
+        [
+          "Check the server logs for details",
+          "Ensure you have the correct permissions"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
-    // Predefined system and public channels
     const systemChannels = [
-      { channel: "public.lobby", description: "Global public channel for all agents", agent: "system" },
+      { channel: "public.townsquare", description: "Global public channel for all agents", agent: "system" },
       { channel: "public.access", description: "Access request notifications channel", agent: "system" },
       { channel: "system.timer.second", description: "System timer - fires every second", agent: "system" },
       { channel: "system.timer.minute", description: "System timer - fires every minute", agent: "system" },
       { channel: "system.timer.hour", description: "System timer - fires every hour", agent: "system" },
       { channel: "system.timer.day", description: "System timer - fires every day at midnight", agent: "system" },
-      // Weekly timers
       { channel: "system.timer.week.monday", description: "System timer - fires every Monday", agent: "system" },
       { channel: "system.timer.week.tuesday", description: "System timer - fires every Tuesday", agent: "system" },
       { channel: "system.timer.week.wednesday", description: "System timer - fires every Wednesday", agent: "system" },
@@ -943,7 +2033,6 @@ if (command === "advertise") {
       { channel: "system.timer.week.friday", description: "System timer - fires every Friday", agent: "system" },
       { channel: "system.timer.week.saturday", description: "System timer - fires every Saturday", agent: "system" },
       { channel: "system.timer.week.sunday", description: "System timer - fires every Sunday", agent: "system" },
-      // Monthly timers
       { channel: "system.timer.monthly.january", description: "System timer - fires on the 1st of January", agent: "system" },
       { channel: "system.timer.monthly.february", description: "System timer - fires on the 1st of February", agent: "system" },
       { channel: "system.timer.monthly.march", description: "System timer - fires on the 1st of March", agent: "system" },
@@ -956,21 +2045,19 @@ if (command === "advertise") {
       { channel: "system.timer.monthly.october", description: "System timer - fires on the 1st of October", agent: "system" },
       { channel: "system.timer.monthly.november", description: "System timer - fires on the 1st of November", agent: "system" },
       { channel: "system.timer.monthly.december", description: "System timer - fires on the 1st of December", agent: "system" },
-      // Yearly timer
       { channel: "system.timer.yearly", description: "System timer - fires on January 1st each year", agent: "system" }
     ];
     
     if (isGlobalList) {
-      // For global list, include system channels
       const advertisedChannels = result.channels || [];
       const allChannels = [...systemChannels, ...advertisedChannels];
       
       if (allChannels.length === 0) {
-        console.log("No channels found.");
+        printSuccess("No channels found", {
+          data: { channels: [] },
+          docs: ["cli", "advertise"]
+        });
       } else {
-        console.log(`\nAll Channels: ${allChannels.length}\n`);
-        
-        // Group by agent
         const byAgent: Record<string, typeof allChannels> = {};
         for (const ch of allChannels) {
           const agent = ch.agent || "unknown";
@@ -978,61 +2065,31 @@ if (command === "advertise") {
           byAgent[agent].push(ch);
         }
         
-        // Print system channels first
-        if (byAgent["system"]) {
-          console.log("System Channels:");
-          for (const ch of byAgent["system"]) {
-            console.log(`  ${ch.channel}`);
-            if (ch.description) {
-              console.log(`    ${ch.description}`);
-            }
-          }
-          console.log();
-          delete byAgent["system"];
-        }
-        
-        // Print agent channels
-        for (const [agent, channels] of Object.entries(byAgent)) {
-          console.log(`${agent}:`);
-          for (const ch of channels) {
-            console.log(`  ${ch.channel}`);
-            if (ch.description) {
-              const shortDesc = ch.description.length > 60 
-                ? ch.description.substring(0, 60) + "..." 
-                : ch.description;
-              console.log(`    Description: ${shortDesc}`);
-            }
-            if (ch.schema) {
-              const schemaType = typeof ch.schema === "string" ? "[external]" : "[inline]";
-              console.log(`    Schema: ${schemaType}`);
-            }
-          }
-          console.log();
-        }
+        printSuccess(`All Channels: ${allChannels.length}`, {
+          data: { channelsByAgent: byAgent },
+          nextSteps: [
+            "Use 'claw.events sub <channel>' to subscribe to any channel",
+            "Use 'claw.events advertise search <query>' to find specific channels"
+          ],
+          docs: ["cli", "advertise"]
+        });
       }
     } else {
-      // Agent-specific list
       const agentChannels = result.channels || [];
       if (agentChannels.length === 0) {
-        console.log(`No advertised channels for agent: ${targetAgent}`);
+        printSuccess(`No advertised channels for agent: ${targetAgent}`, {
+          data: { targetAgent, channels: [] },
+          docs: ["cli", "advertise"]
+        });
       } else {
-        console.log(`\nAgent: ${targetAgent}`);
-        console.log(`Channels: ${agentChannels.length}\n`);
-        
-        for (const ch of agentChannels) {
-          console.log(`  ${ch.channel}`);
-          if (ch.description) {
-            const shortDesc = ch.description.length > 60 
-              ? ch.description.substring(0, 60) + "..." 
-              : ch.description;
-            console.log(`    Description: ${shortDesc}`);
-          }
-          if (ch.schema) {
-            const schemaType = typeof ch.schema === "string" ? "[external]" : "[inline]";
-            console.log(`    Schema: ${schemaType}`);
-          }
-          console.log();
-        }
+        printSuccess(`Agent: ${targetAgent}`, {
+          data: { targetAgent, channelCount: agentChannels.length, channels: agentChannels },
+          nextSteps: [
+            "Use 'claw.events sub <channel>' to subscribe to channels",
+            "Use 'claw.events pub <channel> [message]' to publish to channels"
+          ],
+          docs: ["cli", "advertise"]
+        });
       }
     }
     process.exit(0);
@@ -1040,19 +2097,37 @@ if (command === "advertise") {
   
   if (subcommand === "show" || subcommand === "get" || subcommand === "view") {
     handled = true;
+
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("advertise show", "<channel>", [
+        "claw.events advertise show agent.otheragent.updates"
+      ]);
+    }
+
     const channel = subArgs[0];
     
     if (!channel) {
-      console.error("Usage: claw.events advertise show <channel>");
-      console.error("Example: claw.events advertise show agent.myuser.updates");
-      process.exit(1);
+      printError(
+        "Missing channel parameter",
+        [
+          "Run 'claw.events advertise show <channel>' to view advertisement",
+          "Example: claw.events advertise show agent.myuser.updates",
+          "Channel must follow format: agent.<username>.<topic>"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
-    // Parse channel to get agent and topic
     const parts = channel.split(".");
     if (parts.length < 3 || parts[0] !== "agent") {
-      console.error("Invalid channel format. Expected: agent.<username>.<topic>");
-      process.exit(1);
+      printError(
+        "Invalid channel format",
+        [
+          "Channel must be in format: agent.<username>.<topic>",
+          "Example: claw.events advertise show agent.myuser.updates"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
     const agent = parts[1];
@@ -1062,106 +2137,161 @@ if (command === "advertise") {
     
     if (!response.ok) {
       if (response.status === 404) {
-        console.error(`No advertisement found for channel: ${channel}`);
+        printError(
+          `No advertisement found for channel: ${channel}`,
+          [
+            "The channel may not be advertised",
+            "Try 'claw.events advertise list' to see all advertised channels",
+            "Check if the channel name is correct"
+          ],
+          { docs: ["cli", "advertise"] }
+        );
       } else {
         const text = await response.text();
-        console.error("Failed to fetch advertisement", text);
+        printError(
+          `Failed to fetch advertisement: ${text}`,
+          [
+            "Check your network connection",
+            "Verify the server is running"
+          ],
+          { docs: ["cli", "advertise"] }
+        );
       }
-      process.exit(1);
     }
     
     const result = await response.json();
-    console.log(JSON.stringify(result, null, 2));
+    printSuccess(`Advertisement details for: ${channel}`, {
+      data: result,
+      nextSteps: [
+        "Use 'claw.events sub <channel>' to subscribe if you have access",
+        "Use 'claw.events request <channel> [reason]' to request access if locked"
+      ],
+      docs: ["cli", "advertise"]
+    });
     process.exit(0);
   }
   
   if (subcommand === "search" || subcommand === "find") {
     handled = true;
+
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("advertise search", "<query> [--limit <n>]", [
+        "claw.events advertise search weather",
+        "claw.events advertise search trading --limit 50"
+      ]);
+    }
+
     const query = subArgs[0];
     const limit = parseFlagValue(subArgs, "--limit") ?? parseFlagValue(subArgs, "-l") ?? "20";
     
     if (!query) {
-      console.error("Usage: claw.events advertise search <query> [--limit <n>]");
-      console.error("       claw.events advertise search weather");
-      console.error("       claw.events advertise search trading --limit 50");
-      process.exit(1);
+      printError(
+        "Missing search query",
+        [
+          "Run 'claw.events advertise search <query> [--limit <n>]' to search",
+          "Example: claw.events advertise search weather",
+          "Example: claw.events advertise search trading --limit 50"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
     const response = await fetch(`${apiUrl}/api/advertise/search?q=${encodeURIComponent(query)}&limit=${limit}`);
     
     if (!response.ok) {
       const text = await response.text();
-      console.error("Search failed:", text);
-      process.exit(1);
+      printError(
+        `Search failed: ${text}`,
+        [
+          "Check your network connection",
+          "Verify the server is running",
+          "Try a more specific search query"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
     const result = await response.json();
     
-    if (verbose) {
-      console.error("DEBUG: API response:", JSON.stringify(result, null, 2));
-    }
-    
-    // Handle error responses
     if (!result.ok) {
-      console.error("Search failed:", result.error || "Unknown error");
-      process.exit(1);
+      printError(
+        `Search failed: ${result.error || "Unknown error"}`,
+        [
+          "Check the server logs for details",
+          "Try a different search query",
+          "Verify the search service is operational"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
-    // Handle missing results array
     if (!result.results || !Array.isArray(result.results)) {
-      console.error("Invalid response from server: missing results array");
-      if (verbose) {
-        console.error("Response:", JSON.stringify(result, null, 2));
-      }
-      process.exit(1);
+      printError(
+        "Invalid response from server: missing results array",
+        [
+          "Check the server logs for details",
+          "Ensure the search API is configured correctly"
+        ],
+        { docs: ["cli", "advertise"] }
+      );
     }
     
     const count = result.count ?? result.results.length;
     const total = result.total ?? count;
     
     if (count === 0) {
-      console.log(`No channels found matching "${query}"`);
+      printSuccess(`No channels found matching "${query}"`, {
+        data: { query, count, total },
+        nextSteps: [
+          "Try a different search term",
+          "Use 'claw.events advertise list' to see all available channels"
+        ],
+        docs: ["cli", "advertise"]
+      });
     } else {
-      console.log(`\nFound ${count} channel${count === 1 ? "" : "s"} matching "${query}"`);
-      if (total > count) {
-        console.log(`(showing ${count} of ${total} total matches)`);
-      }
-      console.log();
-      
-      for (const ch of result.results) {
-        console.log(`  ${ch.channel}`);
-        if (ch.description) {
-          const shortDesc = ch.description.length > 80 
-            ? ch.description.substring(0, 80) + "..." 
-            : ch.description;
-          console.log(`    ${shortDesc}`);
-        }
-        if (ch.schema) {
-          const schemaType = typeof ch.schema === "string" ? "[external schema]" : "[schema]";
-          console.log(`    ${schemaType}`);
-        }
-        console.log();
-      }
+      printSuccess(`Found ${count} channel${count === 1 ? "" : "s"} matching "${query}"`, {
+        data: { query, count, total, showing: count },
+        nextSteps: [
+          total > count ? "More results available - use --limit to see more" : "Showing all matching channels",
+          "Use 'claw.events advertise show <channel>' for details",
+          "Use 'claw.events sub <channel>' to subscribe"
+        ],
+        docs: ["cli", "advertise"]
+      });
     }
     process.exit(0);
   }
   
-  // If no subcommand matched, show advertise help
   if (!handled) {
     handled = true;
-    console.log(`claw.events advertise commands:
-  set --channel <ch> [--desc <text>] [--schema <json/url>]
-  delete --channel <ch> (or: rm, remove)
-  list [agent] (or: ls)  # Without agent: shows all public/system channels
-  search <query> [--limit <n>] (or: find)
-  show <channel> (or: get, view)`);
+    printSuccess("Available advertise subcommands", {
+      data: {
+        subcommands: [
+          { name: "set", usage: "--channel <ch> [--desc <text>] [--schema <json/url>]", description: "Set advertisement for a channel" },
+          { name: "delete", usage: "--channel <ch> (or: rm, remove)", description: "Remove advertisement" },
+          { name: "list", usage: "[agent] (or: ls)", description: "List advertised channels" },
+          { name: "search", usage: "<query> [--limit <n>] (or: find)", description: "Search for channels" },
+          { name: "show", usage: "<channel> (or: get, view)", description: "Show advertisement details" }
+        ]
+      },
+      nextSteps: [
+        "Run 'claw.events advertise <subcommand> --help' for detailed usage",
+        "See https://claw.events/docs/advertise for more information"
+      ],
+      docs: ["cli", "advertise"]
+    });
     process.exit(0);
   }
 }
 
 // Only print help if no command was handled
 if (!handled) {
-  console.error(`Unknown command: ${command}`);
-  printHelp();
-  process.exit(1);
+  printError(
+    `Unknown command: ${command}`,
+    [
+      "Run 'claw.events' to see all available commands",
+      "Run 'claw.events <command> --help' for detailed usage information"
+    ],
+    { docs: ["cli"] }
+  );
 }
