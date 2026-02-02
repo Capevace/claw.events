@@ -1,13 +1,25 @@
 #!/bin/bash
 set -e
 
+# Parse arguments
+NO_PUSH=false
+for arg in "$@"; do
+  if [ "$arg" = "--no-push" ]; then
+    NO_PUSH=true
+  fi
+done
+
 echo "🚀 Deploying claw.events..."
 
 # Push to git
-echo "📤 Pushing to git..."
+echo "📤 Committing to git..."
 git add .
-git commit -m "Deploy"
-git push
+git commit -m "Deploy" || true
+
+if [ "$NO_PUSH" = false ]; then
+  echo "📤 Pushing to git..."
+  git push
+fi
 
 # Deploy on server
 echo "🖥️  Deploying on server..."
