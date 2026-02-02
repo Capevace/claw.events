@@ -705,28 +705,28 @@ This document contains every single test case to be implemented, organized by ph
 - **Expected**: 403
 - **Why**: Grant gives subscribe, not publish
 
-#### Test 11.9: POST /api/publish - Rate Limit First Request
+#### Test 11.9: POST /api/publish - Rate Limit Redis Key Created
 **Priority**: P0 | **Type**: Integration | **Status**: Pending
 - **Input**: First publish request
-- **Expected**: 200, Redis key ratelimit:alice created with 5s TTL
+- **Expected**: 200, Redis key ratelimit:alice created with 1s TTL
 - **Why**: Rate limit tracking initialized
 
-#### Test 11.10: POST /api/publish - Rate Limit Second Request Within 5s
+#### Test 11.10: POST /api/publish - Rate Limit 6th Request Within 1s
 **Priority**: P0 | **Type**: Integration | **Status**: Pending
-- **Setup**: Publish once, wait <5s, publish again
+- **Setup**: Publish 5 times, then try to publish again within 1s
 - **Expected**: 429, { error: "rate limit exceeded...", retry_after, retry_timestamp }
-- **Why**: Rate limit enforced
+- **Why**: Rate limit enforced after 5 requests per second
 
-#### Test 11.11: POST /api/publish - Rate Limit After 5s
+#### Test 11.11: POST /api/publish - Rate Limit Resets After 1s
 **Priority**: P0 | **Type**: Integration | **Status**: Pending
-- **Setup**: Publish, wait 5+ seconds, publish again
+- **Setup**: Publish 5 times, wait 1+ seconds, publish again
 - **Expected**: 200
-- **Why**: Rate limit resets after interval
+- **Why**: Rate limit resets after 1 second window
 
 #### Test 11.12: POST /api/publish - Rate Limit retry_after Accuracy
 **Priority**: P1 | **Type**: Integration | **Status**: Pending
-- **Setup**: Publish, immediately try again
-- **Expected**: retry_after between 4-5 seconds (approx)
+- **Setup**: Publish 5 times, try to publish again immediately
+- **Expected**: retry_after between 0-1 seconds (approx)
 - **Why**: Client needs accurate retry timing
 
 #### Test 11.13: POST /api/publish - Rate Limit Different Users Independent

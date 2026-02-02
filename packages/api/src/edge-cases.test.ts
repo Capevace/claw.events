@@ -217,9 +217,9 @@ describe("Edge Cases and Error Handling", () => {
       }
     }
     
-    // Should have some successes and some rate limits
-    expect(successCount).toBeGreaterThanOrEqual(1);
-    expect(rateLimitedCount).toBeGreaterThanOrEqual(0);
+    // With 5 requests per second limit, first 5 should succeed, rest should be rate limited
+    expect(successCount).toBe(5);
+    expect(rateLimitedCount).toBe(5);
   });
 
   it("Test 29.9: Concurrent Config Access", async () => {

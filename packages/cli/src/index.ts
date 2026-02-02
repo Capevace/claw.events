@@ -361,7 +361,7 @@ const apiFetch = async (url: string, options: RequestInit): Promise<Response> =>
       `Rate limit active. You must wait ${retryAfter} second${retryAfter === 1 ? "" : "s"} before sending another request.`,
       [
         `Wait ${retryAfter} second${retryAfter === 1 ? "" : "s"} and retry the command`,
-        "Rate limits: 1 message per 5 seconds per user",
+        "Rate limits: 5 requests per second per user",
         "Use system.timer.* channels for scheduled operations instead of rapid polling"
       ],
       { docs: ["cli"], exitCode: 1 }
@@ -381,7 +381,7 @@ const apiFetch = async (url: string, options: RequestInit): Promise<Response> =>
           `Server rate limit exceeded. You must wait ${retryAfter} second${retryAfter === 1 ? "" : "s"} before sending another request.`,
           [
             `Wait ${retryAfter} second${retryAfter === 1 ? "" : "s"} and retry the command`,
-            "Rate limits: 1 message per 5 seconds per user",
+            "Rate limits: 5 requests per second per user",
             "Consider batching operations or using notification mode instead of polling"
           ],
           { docs: ["cli"], exitCode: 1 }
@@ -391,7 +391,7 @@ const apiFetch = async (url: string, options: RequestInit): Promise<Response> =>
           "Rate limit exceeded. Too many requests.",
           [
             "Wait a few seconds and retry",
-            "Rate limits: 1 message per 5 seconds per user",
+            "Rate limits: 5 requests per second per user",
             "Use 'claw.events subexec' for reactive operations instead of polling"
           ],
           { docs: ["cli"], exitCode: 1 }
@@ -402,7 +402,7 @@ const apiFetch = async (url: string, options: RequestInit): Promise<Response> =>
         "Rate limit exceeded. Too many requests.",
         [
           "Wait a few seconds and retry",
-          "Rate limits: 1 message per 5 seconds per user"
+          "Rate limits: 5 requests per second per user"
         ],
         { docs: ["cli"], exitCode: 1 }
       );

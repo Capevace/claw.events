@@ -289,7 +289,7 @@ describe("Publishing Endpoint Tests", () => {
   });
 
   describe("POST /api/publish - Rate Limiting", () => {
-    it("Test 11.9: POST /api/publish - Rate Limit First Request", async () => {
+    it("Test 11.9: POST /api/publish - Rate Limit Redis Key Created", async () => {
       const token = await createTestToken("alice", jwtSecret);
 
       const mockFetch = mock(fetch, () => {
@@ -308,15 +308,15 @@ describe("Publishing Endpoint Tests", () => {
         body: JSON.stringify({ channel: "public.test", payload: {} }),
       });
 
-      // Check Redis key exists
+      // Check Redis key exists with 1 second TTL
       const ttl = await redis.ttl("ratelimit:alice");
       expect(ttl).toBeGreaterThan(0);
-      expect(ttl).toBeLessThanOrEqual(5);
+      expect(ttl).toBeLessThanOrEqual(1);
 
       mockFetch.restore();
     });
 
-    it("Test 11.10: POST /api/publish - Rate Limit Second Request Within 5s", async () => {
+    it("Test 11.10: POST /api/publish - Rate Limit 6th Request Within 1s", async () => {
       const token = await createTestToken("alice", jwtSecret);
 
       const mockFetch = mock(fetch, () => {
@@ -326,17 +326,20 @@ describe("Publishing Endpoint Tests", () => {
         ));
       });
 
-      // First request
-      await fetch(`${TEST_API_URL}/api/publish`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-        },
-        body: JSON.stringify({ channel: "public.test", payload: {} }),
-      });
+      // First 5 requests should succeed
+      for (let i = 0; i < 5; i++) {
+        const response = await fetch(`${TEST_API_URL}/api/publish`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
+          },
+          body: JSON.stringify({ channel: "public.test", payload: {} }),
+        });
+        expect(response.status).toBe(200);
+      }
 
-      // Second request immediately
+      // 6th request should be rate limited
       const response = await fetch(`${TEST_API_URL}/api/publish`, {
         method: "POST",
         headers: {
@@ -355,7 +358,7 @@ describe("Publishing Endpoint Tests", () => {
       mockFetch.restore();
     });
 
-    it("Test 11.11: POST /api/publish - Rate Limit After 5s", async () => {
+    it("Test 11.11: POST /api/publish - Rate Limit Resets After 1s", async () => {
       const token = await createTestToken("ratetest", jwtSecret);
 
       const mockFetch = mock(fetch, () => {
@@ -365,20 +368,22 @@ describe("Publishing Endpoint Tests", () => {
         ));
       });
 
-      // First request
-      await fetch(`${TEST_API_URL}/api/publish`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-        },
-        body: JSON.stringify({ channel: "public.test", payload: {} }),
-      });
+      // Send 5 requests to hit the limit
+      for (let i = 0; i < 5; i++) {
+        await fetch(`${TEST_API_URL}/api/publish`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
+          },
+          body: JSON.stringify({ channel: "public.test", payload: {} }),
+        });
+      }
 
-      // Wait for rate limit to reset
-      await new Promise((resolve) => setTimeout(resolve, 5100));
+      // Wait for rate limit window to reset (1 second + buffer)
+      await new Promise((resolve) => setTimeout(resolve, 1100));
 
-      // Second request after 5 seconds
+      // Request after 1 second should succeed
       const response = await fetch(`${TEST_API_URL}/api/publish`, {
         method: "POST",
         headers: {
@@ -391,7 +396,7 @@ describe("Publishing Endpoint Tests", () => {
       expect(response.status).toBe(200);
 
       mockFetch.restore();
-    }, 10000);
+    }, 5000);
 
     it("Test 11.12: POST /api/publish - Rate Limit retry_after Accuracy", async () => {
       const token = await createTestToken("alice", jwtSecret);
@@ -403,17 +408,19 @@ describe("Publishing Endpoint Tests", () => {
         ));
       });
 
-      // First request
-      await fetch(`${TEST_API_URL}/api/publish`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-        },
-        body: JSON.stringify({ channel: "public.test", payload: {} }),
-      });
+      // Send 5 requests to hit the limit
+      for (let i = 0; i < 5; i++) {
+        await fetch(`${TEST_API_URL}/api/publish`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
+          },
+          body: JSON.stringify({ channel: "public.test", payload: {} }),
+        });
+      }
 
-      // Second request immediately
+      // 6th request should be rate limited with ~1s retry_after
       const response = await fetch(`${TEST_API_URL}/api/publish`, {
         method: "POST",
         headers: {
@@ -424,8 +431,8 @@ describe("Publishing Endpoint Tests", () => {
       });
 
       const body = await response.json();
-      expect(body.retry_after).toBeGreaterThanOrEqual(4);
-      expect(body.retry_after).toBeLessThanOrEqual(5);
+      expect(body.retry_after).toBeGreaterThanOrEqual(0);
+      expect(body.retry_after).toBeLessThanOrEqual(1);
 
       mockFetch.restore();
     });
