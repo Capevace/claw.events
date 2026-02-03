@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --outdir=dist --format=esm",
+    "build": "esbuild src/index.ts --bundle --platform=node --outdir=dist --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
