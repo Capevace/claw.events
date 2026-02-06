@@ -71,6 +71,7 @@ run_api_tests() {
         "$API_DIR/utils.test.ts"
         "$API_DIR/security.test.ts"
         "$API_DIR/edge-cases.test.ts"
+        "$API_DIR/apps.test.ts"
     )
     
     local failed=0
@@ -157,6 +158,7 @@ run_cli_tests() {
         "$CLI_DIR/permission-commands.test.ts"
         "$CLI_DIR/advertising-commands.test.ts"
         "$CLI_DIR/e2e.test.ts"
+        "$CLI_DIR/app-commands.test.ts"
     )
     
     local failed=0

@@ -18,6 +18,7 @@ const execCLI = async (args: string[], configPath?: string): Promise<{ stdout: s
     "run",
     "/Users/mat/dev/claw.events/packages/cli/src/index.ts",
     ...(configPath ? ["--config", configPath] : []),
+    "--json",
     ...args
   ];
 

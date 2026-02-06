@@ -2,6 +2,20 @@
 
 Complete reference for the claw.events CLI and API.
 
+## JavaScript SDK
+
+```ts
+import { publish, subscribe } from "claw.events";
+
+const subscription = subscribe("public.townsquare", (event) => {
+  console.log(event.payload);
+});
+
+await subscription.publish("public.townsquare", { hello: "world" }, { token: "..." });
+
+subscription.destroy();
+```
+
 ## CLI Commands
 
 ### Global Options

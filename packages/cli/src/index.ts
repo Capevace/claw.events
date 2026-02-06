@@ -40,11 +40,23 @@ type GlobalOptions = {
   configPath?: string;
   serverUrl?: string;
   token?: string;
+  json?: boolean;
 };
 
-const parseGlobalOptions = (args: string[]): { options: GlobalOptions; remainingArgs: string[] } => {
+let jsonOutput = false;
+
+const setJsonOutput = (value: boolean) => {
+  jsonOutput = value;
+};
+
+const isJsonOutput = (): boolean => jsonOutput;
+
+const parseGlobalOptions = (args: string[]): { options: GlobalOptions; remainingArgs: string[]; showHelp?: boolean; showVersion?: boolean } => {
   const options: GlobalOptions = {};
   const remainingArgs: string[] = [];
+  let showHelp = false;
+  let showVersion = false;
+  let hasSeenCommand = false;
   
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -64,17 +76,32 @@ const parseGlobalOptions = (args: string[]): { options: GlobalOptions; remaining
         options.token = args[i + 1];
         i++; // Skip the value
       }
+    } else if (arg === "--json" || arg === "-j") {
+      options.json = true;
+      jsonOutput = true;
+    } else if (arg === "--help" || arg === "-h") {
+      if (hasSeenCommand) {
+        // --help comes after a command, keep it for command-specific help
+        remainingArgs.push(arg);
+      } else {
+        // --help is before any command, treat as global help
+        showHelp = true;
+      }
+    } else if (arg === "--version" || arg === "-v") {
+      showVersion = true;
     } else {
+      // This is a command or argument (not a flag)
+      hasSeenCommand = true;
       remainingArgs.push(arg);
     }
   }
   
-  return { options, remainingArgs };
+  return { options, remainingArgs, showHelp, showVersion };
 };
 
 // Parse global options from raw args
 const rawArgs = process.argv.slice(2);
-const { options: globalOptions, remainingArgs: filteredArgs } = parseGlobalOptions(rawArgs);
+const { options: globalOptions, remainingArgs: filteredArgs, showHelp, showVersion } = parseGlobalOptions(rawArgs);
 
 // Determine config paths (use --config override or default to ~/.claw)
 let configDir: string;
@@ -95,9 +122,9 @@ if (globalOptions.configPath) {
 }
 
 // ============================================================================
-// LLM-FRIENDLY OUTPUT HELPERS
+// OUTPUT FORMAT HELPERS
 // ============================================================================
-// These functions ensure all output is structured and actionable for LLMs
+// These functions provide both human-readable and JSON output formats
 
 type OutputOptions = {
   nextSteps?: string[];
@@ -105,84 +132,385 @@ type OutputOptions = {
   data?: unknown;
 };
 
-/**
- * Print success output in a format that's friendly to both humans and LLMs
- * Always includes context about what happened and what to do next
- */
-const printSuccess = (message: string, options?: OutputOptions) => {
-  const output: Record<string, unknown> = {
-    status: "success",
-    message
-  };
-  
-  if (options?.data) {
-    output.data = options.data;
-  }
-  
-  if (options?.nextSteps && options.nextSteps.length > 0) {
-    output.nextSteps = options.nextSteps;
-  }
-  
-  if (options?.docs && options.docs.length > 0) {
-    output.documentation = options.docs.map(key => DOCS[key as keyof typeof DOCS] || key);
-  }
-  
-  // Print structured JSON for LLM parsing
-  console.log(JSON.stringify(output, null, 2));
+// Unicode box drawing characters for nice layouts
+const BOX = {
+  h: "─",
+  v: "│",
+  tl: "┌",
+  tr: "┐",
+  bl: "└",
+  br: "┘",
+  ml: "├",
+  mr: "┤",
+  tm: "┬",
+  bm: "┴",
+  cross: "┼",
+  arrow: "→",
+  check: "✓",
+  x: "✗",
+  info: "ℹ",
+  bullet: "•"
+};
+
+// ============================================================================
+// COLOR SUPPORT
+// ============================================================================
+
+let colorEnabled = true;
+
+const setColorEnabled = (value: boolean) => {
+  colorEnabled = value;
 };
 
 /**
- * Print error output with actionable fixes and guidance
- * Always includes: what went wrong, how to fix it, and where to learn more
+ * Detect if terminal supports colors
  */
-const printError = (error: string, fixes: string[], options?: { docs?: string[]; exitCode?: number }) => {
-  const output: Record<string, unknown> = {
-    status: "error",
-    error,
-    fixes
-  };
-  
-  if (options?.docs && options.docs.length > 0) {
-    output.documentation = options.docs.map(key => DOCS[key as keyof typeof DOCS] || key);
+const supportsColor = (): boolean => {
+  // Check for explicit no-color flag or env var
+  if (process.env.NO_COLOR || process.env.CLAW_NO_COLOR) {
+    return false;
   }
   
-  // Print structured JSON to stderr for LLM parsing
-  console.error(JSON.stringify(output, null, 2));
+  // Check if stdout is a TTY
+  if (!process.stdout.isTTY) {
+    return false;
+  }
+  
+  // Check for CI environment (usually no colors)
+  if (process.env.CI || process.env.TEAMCITY_VERSION || process.env.TRAVIS || process.env.CIRCLECI) {
+    return false;
+  }
+  
+  // Check for terminal color support via environment variables
+  if (process.env.FORCE_COLOR) {
+    return process.env.FORCE_COLOR !== "0";
+  }
+  
+  // Check TERM environment variable
+  const term = process.env.TERM;
+  if (term) {
+    if (term === "dumb" || term === "unknown") {
+      return false;
+    }
+    // Most modern terminals support colors
+    return true;
+  }
+  
+  return true;
+};
+
+// Initialize color support
+const colorSupported = supportsColor();
+
+// ANSI color codes
+const COLORS = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  // Foreground colors
+  black: "\x1b[30m",
+  red: "\x1b[31m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  blue: "\x1b[34m",
+  magenta: "\x1b[35m",
+  cyan: "\x1b[36m",
+  white: "\x1b[37m",
+  brightBlack: "\x1b[90m",
+  brightRed: "\x1b[91m",
+  brightGreen: "\x1b[92m",
+  brightYellow: "\x1b[93m",
+  brightBlue: "\x1b[94m",
+  brightMagenta: "\x1b[95m",
+  brightCyan: "\x1b[96m",
+  brightWhite: "\x1b[97m",
+  // Background colors
+  bgRed: "\x1b[41m",
+  bgGreen: "\x1b[42m",
+  bgYellow: "\x1b[43m",
+  bgBlue: "\x1b[44m",
+  bgMagenta: "\x1b[45m",
+  bgCyan: "\x1b[46m"
+};
+
+/**
+ * Apply color to text if color is enabled
+ */
+const colorize = (text: string, ...colors: string[]): string => {
+  if (!colorEnabled || !colorSupported || jsonOutput) {
+    return text;
+  }
+  return colors.join("") + text + COLORS.reset;
+};
+
+/**
+ * Format data for human-readable display
+ */
+const formatDataHuman = (data: unknown, indent = 0): string => {
+  if (data === null || data === undefined) {
+    return "null";
+  }
+  
+  if (typeof data === "string") {
+    return data;
+  }
+  
+  if (typeof data === "number" || typeof data === "boolean") {
+    return String(data);
+  }
+  
+  if (Array.isArray(data)) {
+    if (data.length === 0) return "[]";
+    const prefix = "  ".repeat(indent);
+    return data.map((item, i) => {
+      const formatted = formatDataHuman(item, indent + 1);
+      if (typeof item === "object" && item !== null && !Array.isArray(item)) {
+        return `${prefix}${BOX.bullet} [${i}]:\n${formatted}`;
+      }
+      return `${prefix}${BOX.bullet} [${i}]: ${formatted}`;
+    }).join("\n");
+  }
+  
+  if (typeof data === "object") {
+    const obj = data as Record<string, unknown>;
+    const keys = Object.keys(obj);
+    if (keys.length === 0) return "{}";
+    const prefix = "  ".repeat(indent);
+    const maxKeyLength = Math.max(...keys.map(k => k.length));
+    return keys.map(key => {
+      const value = obj[key];
+      const formatted = formatDataHuman(value, indent + 1);
+      if (typeof value === "object" && value !== null) {
+        return `${prefix}${BOX.bullet} ${key.padEnd(maxKeyLength)} :\n${formatted}`;
+      }
+      return `${prefix}${BOX.bullet} ${key.padEnd(maxKeyLength)} : ${formatted}`;
+    }).join("\n");
+  }
+  
+  return String(data);
+};
+
+/**
+ * Wrap text to a maximum width
+ */
+const wrapText = (text: string, maxWidth: number): string[] => {
+  const words = text.split(" ");
+  const lines: string[] = [];
+  let currentLine = "";
+  
+  for (const word of words) {
+    if ((currentLine + " " + word).length > maxWidth && currentLine.length > 0) {
+      lines.push(currentLine.trim());
+      currentLine = word;
+    } else {
+      currentLine += " " + word;
+    }
+  }
+  
+  if (currentLine.trim()) {
+    lines.push(currentLine.trim());
+  }
+  
+  return lines;
+};
+
+/**
+ * Print success output in human-readable or JSON format
+ */
+const printSuccess = (message: string, options?: OutputOptions) => {
+  if (jsonOutput) {
+    const output: Record<string, unknown> = {
+      status: "success",
+      message
+    };
+    
+    if (options?.data) {
+      output.data = options.data;
+    }
+    
+    if (options?.nextSteps && options.nextSteps.length > 0) {
+      output.nextSteps = options.nextSteps;
+    }
+    
+    if (options?.docs && options.docs.length > 0) {
+      output.documentation = options.docs.map(key => DOCS[key as keyof typeof DOCS] || key);
+    }
+    
+    console.log(JSON.stringify(output, null, 2));
+  } else {
+    // Human-readable format
+    const width = Math.min(80, process.stdout.columns || 80);
+    console.log();
+    console.log(`${colorize(BOX.check, COLORS.green, COLORS.bold)} ${colorize(message, COLORS.green)}`);
+    console.log();
+    
+    if (options?.data) {
+      console.log(formatDataHuman(options.data));
+      console.log();
+    }
+    
+    if (options?.nextSteps && options.nextSteps.length > 0) {
+      console.log(colorize("Next steps:", COLORS.cyan, COLORS.bold));
+      for (const step of options.nextSteps) {
+        const lines = wrapText(step, width - 4);
+        console.log(`  ${colorize(BOX.arrow, COLORS.cyan)} ${lines[0]}`);
+        for (let i = 1; i < lines.length; i++) {
+          console.log(`    ${lines[i]}`);
+        }
+      }
+      console.log();
+    }
+    
+    if (options?.docs && options.docs.length > 0) {
+      const docUrls = options.docs.map(key => DOCS[key as keyof typeof DOCS] || key);
+      console.log(colorize("Documentation:", COLORS.cyan, COLORS.bold));
+      for (const url of docUrls) {
+        console.log(`  ${colorize(BOX.bullet, COLORS.cyan)} ${url}`);
+      }
+      console.log();
+    }
+  }
+};
+
+/**
+ * Print error output with actionable fixes
+ */
+const printError = (error: string, fixes: string[], options?: { docs?: string[]; exitCode?: number; data?: unknown }) => {
+  if (jsonOutput) {
+    const output: Record<string, unknown> = {
+      status: "error",
+      error,
+      fixes
+    };
+    
+    if (options?.docs && options.docs.length > 0) {
+      output.documentation = options.docs.map(key => DOCS[key as keyof typeof DOCS] || key);
+    }
+    
+    if (options?.data) {
+      output.data = options.data;
+    }
+    
+    console.error(JSON.stringify(output, null, 2));
+  } else {
+    // Human-readable format
+    const width = Math.min(80, process.stdout.columns || 80);
+    console.error();
+    console.error(`${colorize(BOX.x, COLORS.red, COLORS.bold)} ${colorize("Error:", COLORS.red, COLORS.bold)} ${colorize(error, COLORS.red)}`);
+    console.error();
+    
+    if (options?.data) {
+      console.error(colorize("Details:", COLORS.yellow, COLORS.bold));
+      console.error(formatDataHuman(options.data));
+      console.error();
+    }
+    
+    if (fixes.length > 0) {
+      console.error(colorize("How to fix:", COLORS.yellow, COLORS.bold));
+      for (const fix of fixes) {
+        const lines = wrapText(fix, width - 4);
+        console.error(`  ${colorize(BOX.arrow, COLORS.yellow)} ${lines[0]}`);
+        for (let i = 1; i < lines.length; i++) {
+          console.error(`    ${lines[i]}`);
+        }
+      }
+      console.error();
+    }
+    
+    if (options?.docs && options.docs.length > 0) {
+      const docUrls = options.docs.map(key => DOCS[key as keyof typeof DOCS] || key);
+      console.error(colorize("Documentation:", COLORS.yellow, COLORS.bold));
+      for (const url of docUrls) {
+        console.error(`  ${colorize(BOX.bullet, COLORS.yellow)} ${url}`);
+      }
+      console.error();
+    }
+  }
   
   process.exit(options?.exitCode ?? 1);
 };
 
 /**
- * Print informational message with context
+ * Print informational message
  */
 const printInfo = (message: string, context?: string) => {
-  const output: Record<string, unknown> = {
-    status: "info",
-    message
-  };
-  
-  if (context) {
-    output.context = context;
+  if (jsonOutput) {
+    const output: Record<string, unknown> = {
+      status: "info",
+      message
+    };
+    
+    if (context) {
+      output.context = context;
+    }
+    
+    console.error(JSON.stringify(output));
+  } else {
+    if (context) {
+      console.error(`${colorize(BOX.info, COLORS.blue)} ${colorize(message, COLORS.blue)} (${context})`);
+    } else {
+      console.error(`${colorize(BOX.info, COLORS.blue)} ${colorize(message, COLORS.blue)}`);
+    }
   }
-  
-  console.error(JSON.stringify(output));
 };
 
 /**
- * Print help in both human-readable and structured formats
+ * Print help in both human-readable and JSON formats
  */
 const printStructuredHelp = (command: string, description: string, usage: string, examples: string[], subcommands?: string[]) => {
-  const output = {
-    status: "help",
-    command,
-    description,
-    usage,
-    examples,
-    subcommands: subcommands || [],
-    documentation: DOCS.cli
-  };
-  
-  console.log(JSON.stringify(output, null, 2));
+  if (jsonOutput) {
+    const output = {
+      status: "help",
+      command,
+      description,
+      usage,
+      examples,
+      subcommands: subcommands || [],
+      documentation: DOCS.cli
+    };
+    
+    console.log(JSON.stringify(output, null, 2));
+  } else {
+    const width = Math.min(80, process.stdout.columns || 80);
+    console.log();
+    console.log(`${colorize(BOX.info, COLORS.cyan)} ${colorize("Help:", COLORS.cyan, COLORS.bold)} ${colorize(command, COLORS.cyan)}`);
+    console.log();
+    
+    // Description
+    if (description) {
+      const descLines = wrapText(description, width - 2);
+      for (const line of descLines) {
+        console.log(`  ${line}`);
+      }
+      console.log();
+    }
+    
+    // Usage
+    console.log(colorize("Usage:", COLORS.cyan, COLORS.bold));
+    console.log(`  ${colorize(usage, COLORS.cyan)}`);
+    console.log();
+    
+    // Examples
+    if (examples.length > 0) {
+      console.log(colorize("Examples:", COLORS.cyan, COLORS.bold));
+      for (const example of examples) {
+        console.log(`  ${colorize(BOX.bullet, COLORS.cyan)} ${example}`);
+      }
+      console.log();
+    }
+    
+    // Subcommands
+    if (subcommands && subcommands.length > 0) {
+      console.log(colorize("Subcommands:", COLORS.cyan, COLORS.bold));
+      for (const sub of subcommands) {
+        console.log(`  ${colorize(BOX.bullet, COLORS.cyan)} ${sub}`);
+      }
+      console.log();
+    }
+    
+    console.log(`${colorize("Documentation:", COLORS.cyan, COLORS.bold)} ${DOCS.cli}`);
+    console.log();
+  }
 };
 
 // ============================================================================
@@ -507,44 +835,171 @@ const getAuthToken = (): string | undefined => {
   return globalOptions.token ?? loadConfig().token;
 };
 
-  const printHelp = () => {
-  const output = {
-    status: "help",
-    description: "Available commands for the claw.events CLI",
-    globalOptions: [
-      { option: "--config <path>", description: "Override the default config file/directory path (~/.config/.claw.events)" },
-      { option: "--server <url>", description: "Override the server URL (takes precedence over config file)" },
-      { option: "--token <token>", description: "Override the authentication token (allows using different tokens without logging out)" }
-    ],
-    commands: [
-      { command: "config --server <url>", description: "Set server URL (default: claw.events)" },
-      { command: "config --show", description: "Show current configuration" },
-      { command: "login --user <name> [--key-name <name>] [--key-path <path>]", description: "Authenticate with clawkey SSH signature" },
-      { command: "login --token <token>", description: "Save an existing token (skip verification)" },
-      { command: "dev-register --user <name>", description: "Dev mode registration (no MaltBook verification)" },
-      { command: "verify", description: "Deprecated (use login instead)" },
-      { command: "whoami", description: "Show current authentication state" },
-      { command: "logout", description: "Clear authentication token and username from config" },
-      { command: "instruction-prompt", description: "Output system prompt for AI agents" },
-      { command: "validate [data] [--schema <json>] [--channel <ch>]", description: "Validate JSON against a schema before publishing" },
-      { command: "pub <channel> [message]", description: "Publish any message (string or JSON)" },
-      { command: "sub [--verbose|-vvv] <channel1> [channel2] ...", description: "Subscribe to channels" },
-      { command: "subexec [--verbose|-vvv] [--buffer <n>] [--timeout <ms>] <channel1> [channel2] ... -- <command> [args...]", description: "Execute command on channel events (with optional batching)" },
-      { command: "lock <channel>", description: "Make channel private (require permission)" },
-      { command: "unlock <channel>", description: "Make channel public (default)" },
-      { command: "grant <target_agent> <channel>", description: "Grant access to locked channel" },
-      { command: "revoke <target_agent> <channel>", description: "Revoke access from locked channel" },
-      { command: "request <channel> [reason]", description: "Request access to locked channel" },
-      { command: "advertise set --channel <ch> [--desc <text>] [--schema <json/url>]", description: "Set channel advertisement" },
-      { command: "advertise delete <channel>", description: "Remove channel advertisement" },
-      { command: "advertise list [agent]", description: "List advertised channels (all if no agent specified)" },
-      { command: "advertise search <query> [--limit <n>]", description: "Search for channels" },
-      { command: "advertise show <channel>", description: "Show channel advertisement details" }
-    ],
-    documentation: DOCS.cli
-  };
-  console.log(JSON.stringify(output, null, 2));
+const CLI_VERSION = "1.0.2";
+
+// Handle global --help and --version flags (when no command specified)
+if (showVersion && !filteredArgs[0]) {
+  if (jsonOutput) {
+    console.log(JSON.stringify({
+      status: "success",
+      version: CLI_VERSION,
+      name: "claw.events"
+    }, null, 2));
+  } else {
+    console.log();
+    console.log(`claw.events version ${CLI_VERSION}`);
+    console.log();
+  }
+  process.exit(0);
+}
+
+const printHelp = () => {
+  if (jsonOutput) {
+    const output = {
+      status: "help",
+      description: "Available commands for the claw.events CLI",
+      globalOptions: [
+        { option: "--config <path>", description: "Override the default config file/directory path (~/.config/.claw.events)" },
+        { option: "--server <url>", description: "Override the server URL (takes precedence over config file)" },
+        { option: "--token <token>", description: "Override the authentication token (allows using different tokens without logging out)" },
+        { option: "--json", description: "Output in JSON format (default is human-readable)" },
+        { option: "--version, -v", description: "Show version information" },
+        { option: "--help, -h", description: "Show this help message" }
+      ],
+      commands: [
+        { command: "config --server <url>", description: "Set server URL (default: claw.events)" },
+        { command: "config --show", description: "Show current configuration" },
+        { command: "login --user <name> [--key-name <name>] [--key-path <path>]", description: "Authenticate with clawkey SSH signature" },
+        { command: "login --token <token>", description: "Save an existing token (skip verification)" },
+        { command: "dev-register --user <name>", description: "Dev mode registration (no MaltBook verification)" },
+        { command: "verify", description: "Deprecated (use login instead)" },
+        { command: "whoami", description: "Show current authentication state" },
+        { command: "logout", description: "Clear authentication token and username from config" },
+        { command: "instruction-prompt", description: "Output system prompt for AI agents" },
+        { command: "validate [data] [--schema <json>] [--channel <ch>]", description: "Validate JSON against a schema before publishing" },
+        { command: "pub <channel> [message]", description: "Publish any message (string or JSON)" },
+        { command: "sub [--verbose|-vvv] <channel1> [channel2] ...", description: "Subscribe to channels" },
+        { command: "subexec [--verbose|-vvv] [--buffer <n>] [--timeout <ms>] <channel1> [channel2] ... -- <command> [args...]", description: "Execute command on channel events (with optional batching)" },
+        { command: "lock <channel>", description: "Make channel private (require permission)" },
+        { command: "unlock <channel>", description: "Make channel public (default)" },
+        { command: "grant <target_agent> <channel>", description: "Grant access to locked channel" },
+        { command: "revoke <target_agent> <channel>", description: "Revoke access from locked channel" },
+        { command: "request <channel> [reason]", description: "Request access to locked channel" },
+        { command: "advertise set --channel <ch> [--desc <text>] [--schema <json/url>]", description: "Set channel advertisement" },
+        { command: "advertise delete <channel>", description: "Remove channel advertisement" },
+        { command: "advertise list [agent]", description: "List advertised channels (all if no agent specified)" },
+        { command: "advertise search <query> [--limit <n>]", description: "Search for channels" },
+        { command: "advertise show <channel>", description: "Show channel advertisement details" },
+        { command: "app create <name>", description: "Create a new app and get an API key" },
+        { command: "app list", description: "List all your apps" },
+        { command: "app show <name>", description: "Show app details" },
+        { command: "app rotate <name>", description: "Rotate app key and revoke old one" },
+        { command: "app delete <name>", description: "Delete an app" },
+        { command: "version", description: "Show version information" }
+      ],
+      documentation: DOCS.cli,
+      version: CLI_VERSION
+    };
+    console.log(JSON.stringify(output, null, 2));
+  } else {
+    // Human-readable format
+    const width = Math.min(80, process.stdout.columns || 80);
+    
+    console.log();
+    const topLine = `${BOX.tl}${BOX.h.repeat(width - 2)}${BOX.tr}`;
+    const midLine = `${BOX.v}  claw.events CLI - Real-time event bus for AI agents`.padEnd(width - 1) + BOX.v;
+    const verLine = `${BOX.v}  Version: ${CLI_VERSION}`.padEnd(width - 1) + BOX.v;
+    const botLine = `${BOX.bl}${BOX.h.repeat(width - 2)}${BOX.br}`;
+    console.log(colorize(topLine, COLORS.cyan));
+    console.log(colorize(midLine, COLORS.cyan, COLORS.bold));
+    console.log(colorize(verLine, COLORS.cyan));
+    console.log(colorize(botLine, COLORS.cyan));
+    console.log();
+    
+    console.log(colorize("USAGE:", COLORS.cyan, COLORS.bold));
+    console.log(`  ${colorize("claw.events [options] <command> [arguments]", COLORS.cyan)}`);
+    console.log();
+    
+    console.log(colorize("GLOBAL OPTIONS:", COLORS.cyan, COLORS.bold));
+    console.log(`  --config <path>     Override config file/directory path`);
+    console.log(`  --server <url>      Override the server URL`);
+    console.log(`  --token <token>     Override the authentication token`);
+    console.log(`  --json              Output in JSON format`);
+    console.log(`  --version, -v       Show version information`);
+    console.log(`  --help, -h          Show this help message`);
+    console.log();
+    
+    console.log(colorize("COMMANDS:", COLORS.cyan, COLORS.bold));
+    const commands = [
+      ["Authentication", [
+        ["login --user <name>", "Authenticate with SSH signature"],
+        ["login --token <token>", "Save an existing token"],
+        ["dev-register --user <name>", "Dev mode registration"],
+        ["whoami", "Show authentication state"],
+        ["logout", "Clear authentication"]
+      ]],
+      ["Configuration", [
+        ["config --server <url>", "Set server URL"],
+        ["config --show", "Show configuration"]
+      ]],
+      ["Publishing & Subscribing", [
+        ["pub <channel> [message]", "Publish a message"],
+        ["sub <channel...>", "Subscribe to channels"],
+        ["subexec <channel...> -- <cmd>", "Execute command on events"]
+      ]],
+      ["Permissions", [
+        ["lock <channel>", "Make channel private"],
+        ["unlock <channel>", "Make channel public"],
+        ["grant <agent> <channel>", "Grant access"],
+        ["revoke <agent> <channel>", "Revoke access"],
+        ["request <channel>", "Request access"]
+      ]],
+      ["Advertising", [
+        ["advertise set --channel <ch>", "Set channel ad"],
+        ["advertise delete <channel>", "Remove channel ad"],
+        ["advertise list", "List advertised channels"],
+        ["advertise search <query>", "Search channels"],
+        ["advertise show <channel>", "Show ad details"]
+      ]],
+      ["Apps", [
+        ["app create <name>", "Create an app"],
+        ["app list", "List your apps"],
+        ["app show <name>", "Show app details"],
+        ["app rotate <name>", "Rotate app key"],
+        ["app delete <name>", "Delete an app"]
+      ]],
+      ["Utilities", [
+        ["validate [data]", "Validate JSON"],
+        ["instruction-prompt", "Output AI system prompt"],
+        ["version", "Show version"]
+      ]]
+    ];
+    
+    for (const [category, items] of commands) {
+      console.log(`  ${colorize(`${category}:`, COLORS.cyan)}`);
+      let maxCmdLength = 0;
+      for (const [cmd] of items) {
+        maxCmdLength = Math.max(maxCmdLength, cmd.length);
+      }
+      for (const [cmd, desc] of items) {
+        console.log(`    ${cmd.padEnd(maxCmdLength + 2)} ${desc}`);
+      }
+      console.log();
+    }
+    
+    console.log(colorize("DOCUMENTATION:", COLORS.cyan, COLORS.bold));
+    console.log(`  ${DOCS.cli}`);
+    console.log();
+    console.log(colorize("Run 'claw.events <command> --help' for detailed command usage.", COLORS.dim));
+    console.log();
+  }
 };
+
+// Handle global --help flag (when no command specified)
+if (showHelp && !filteredArgs[0]) {
+  printHelp();
+  process.exit(0);
+}
 
 // Helper to print command-specific help
 const printCommandHelp = (command: string, usage: string, examples?: string[]) => {
@@ -2457,6 +2912,506 @@ if (subcommand === "list" || subcommand === "ls") {
     });
     process.exit(0);
   }
+}
+
+// ============================================================================
+// App Management Commands
+// ============================================================================
+
+if (command === "app") {
+  const subcommand = args[0];
+  const subArgs = args.slice(1);
+  
+  // app create <name>
+  if (subcommand === "create") {
+    handled = true;
+    
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("app create", "<name>", [
+        "claw.events app create myapp"
+      ]);
+    }
+    
+    const appName = subArgs[0];
+    
+    if (!appName) {
+      printError(
+        "Missing app name",
+        [
+          "Run 'claw.events app create <name>' to create an app",
+          "Example: claw.events app create myapp",
+          "App names must be 3-32 alphanumeric characters or underscores, no dots"
+        ],
+        { docs: ["cli"] }
+      );
+    }
+    
+    const token = getEffectiveToken();
+    if (!token) {
+      printError(
+        "Authentication required",
+        [
+          "Run 'claw.events login --user <name>' to authenticate",
+          "Or use --token <jwt> for temporary authentication"
+        ],
+        { docs: ["cli", "authentication"] }
+      );
+    }
+    
+    const response = await apiFetch(`${apiUrl}/api/apps`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({ name: appName })
+    });
+    
+    if (!response.ok) {
+      const text = await response.text();
+      const error = JSON.parse(text).error || text;
+      
+      if (response.status === 409) {
+        printError(
+          `App name '${appName}' already exists`,
+          [
+            "Choose a different app name",
+            "Use 'claw.events app list' to see your existing apps",
+            "App names must be globally unique"
+          ],
+          { docs: ["cli"] }
+        );
+      } else if (response.status === 400) {
+        printError(
+          `Invalid app name: ${error}`,
+          [
+            "App names must be 3-32 alphanumeric characters or underscores",
+            "No dots allowed in app names",
+            "Example: 'myapp', 'my_app_123'"
+          ],
+          { docs: ["cli"] }
+        );
+      } else {
+        printError(
+          `Failed to create app: ${error}`,
+          [
+            "Check your network connection",
+            "Verify the server is running",
+            "Ensure you are authenticated"
+          ],
+          { docs: ["cli"] }
+        );
+      }
+    }
+    
+    const result = await response.json() as { app: { name: string; createdAt: number; owner: string }; key: string; hint: string };
+    
+    printSuccess(`App '${appName}' created successfully`, {
+      data: {
+        app: result.app,
+        key: result.key,
+        hint: result.hint,
+        namespace: `app.${appName}.*`,
+        principal: `app:${appName}`
+      },
+      nextSteps: [
+        "Store the app key securely - it will only be shown once",
+        "Use the app key to authenticate: claw.events --token <key> whoami",
+        `Publish to your app's channels: claw.events --token <key> pub app.${appName}.events "hello"`,
+        "Use 'claw.events app list' to see your apps",
+        "Use 'claw.events app rotate <name>' if you need to rotate the key"
+      ],
+      docs: ["cli"]
+    });
+    process.exit(0);
+  }
+  
+  // app list
+  if (subcommand === "list" || subcommand === "ls") {
+    handled = true;
+    
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("app list", "", [
+        "claw.events app list"
+      ]);
+    }
+    
+    const token = getEffectiveToken();
+    if (!token) {
+      printError(
+        "Authentication required",
+        [
+          "Run 'claw.events login --user <name>' to authenticate",
+          "Or use --token <jwt> for temporary authentication"
+        ],
+        { docs: ["cli", "authentication"] }
+      );
+    }
+    
+    const response = await apiFetch(`${apiUrl}/api/apps`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+    
+    if (!response.ok) {
+      const text = await response.text();
+      printError(
+        `Failed to list apps: ${text}`,
+        [
+          "Check your network connection",
+          "Verify the server is running",
+          "Ensure you are authenticated"
+        ],
+        { docs: ["cli"] }
+      );
+    }
+    
+    const result = await response.json() as { apps: { name: string; createdAt: number; owner: string }[]; count: number };
+    
+    if (result.count === 0) {
+      printSuccess("No apps found", {
+        data: { apps: [], count: 0 },
+        nextSteps: [
+          "Create your first app: claw.events app create <name>",
+          "Apps can publish to app.<name>.* channels"
+        ],
+        docs: ["cli"]
+      });
+    } else {
+      printSuccess(`Found ${result.count} app${result.count === 1 ? "" : "s"}`, {
+        data: { apps: result.apps, count: result.count },
+        nextSteps: [
+          "Use 'claw.events app show <name>' to view app details",
+          "Use 'claw.events app rotate <name>' to rotate app keys",
+          "Use 'claw.events app delete <name>' to remove an app"
+        ],
+        docs: ["cli"]
+      });
+    }
+    process.exit(0);
+  }
+  
+  // app show <name>
+  if (subcommand === "show" || subcommand === "get" || subcommand === "info") {
+    handled = true;
+    
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("app show", "<name>", [
+        "claw.events app show myapp"
+      ]);
+    }
+    
+    const appName = subArgs[0];
+    
+    if (!appName) {
+      printError(
+        "Missing app name",
+        [
+          "Run 'claw.events app show <name>' to view app details",
+          "Example: claw.events app show myapp"
+        ],
+        { docs: ["cli"] }
+      );
+    }
+    
+    const token = getEffectiveToken();
+    if (!token) {
+      printError(
+        "Authentication required",
+        [
+          "Run 'claw.events login --user <name>' to authenticate",
+          "Or use --token <jwt> for temporary authentication"
+        ],
+        { docs: ["cli", "authentication"] }
+      );
+    }
+    
+    const response = await apiFetch(`${apiUrl}/api/apps/${appName}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+    
+    if (!response.ok) {
+      if (response.status === 404) {
+        printError(
+          `App '${appName}' not found`,
+          [
+            "Check the app name spelling",
+            "Use 'claw.events app list' to see your apps",
+            "You can only view apps you own"
+          ],
+          { docs: ["cli"] }
+        );
+      } else if (response.status === 403) {
+        printError(
+          "Not authorized to view this app",
+          [
+            "You can only view apps you own",
+            "Use 'claw.events app list' to see your apps"
+          ],
+          { docs: ["cli"] }
+        );
+      } else {
+        const text = await response.text();
+        printError(
+          `Failed to fetch app: ${text}`,
+          [
+            "Check your network connection",
+            "Verify the server is running"
+          ],
+          { docs: ["cli"] }
+        );
+      }
+    }
+    
+    const result = await response.json() as { app: { name: string; createdAt: number; owner: string } };
+    
+    printSuccess(`App details for: ${appName}`, {
+      data: {
+        app: result.app,
+        namespace: `app.${appName}.*`,
+        principal: `app:${appName}`
+      },
+      nextSteps: [
+        `Use 'claw.events app rotate ${appName}' to rotate the app key`,
+        `Use 'claw.events app delete ${appName}' to remove the app`
+      ],
+      docs: ["cli"]
+    });
+    process.exit(0);
+  }
+  
+  // app rotate <name>
+  if (subcommand === "rotate" || subcommand === "rotate-key") {
+    handled = true;
+    
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("app rotate", "<name>", [
+        "claw.events app rotate myapp"
+      ]);
+    }
+    
+    const appName = subArgs[0];
+    
+    if (!appName) {
+      printError(
+        "Missing app name",
+        [
+          "Run 'claw.events app rotate <name>' to rotate an app key",
+          "Example: claw.events app rotate myapp"
+        ],
+        { docs: ["cli"] }
+      );
+    }
+    
+    const token = getEffectiveToken();
+    if (!token) {
+      printError(
+        "Authentication required",
+        [
+          "Run 'claw.events login --user <name>' to authenticate",
+          "Or use --token <jwt> for temporary authentication"
+        ],
+        { docs: ["cli", "authentication"] }
+      );
+    }
+    
+    const response = await apiFetch(`${apiUrl}/api/apps/${appName}/rotate`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+    
+    if (!response.ok) {
+      if (response.status === 404) {
+        printError(
+          `App '${appName}' not found`,
+          [
+            "Check the app name spelling",
+            "Use 'claw.events app list' to see your apps"
+          ],
+          { docs: ["cli"] }
+        );
+      } else if (response.status === 403) {
+        printError(
+          "Not authorized to rotate this app's key",
+          [
+            "You can only rotate keys for apps you own",
+            "Use 'claw.events app list' to see your apps"
+          ],
+          { docs: ["cli"] }
+        );
+      } else {
+        const text = await response.text();
+        printError(
+          `Failed to rotate app key: ${text}`,
+          [
+            "Check your network connection",
+            "Verify the server is running"
+          ],
+          { docs: ["cli"] }
+        );
+      }
+    }
+    
+    const result = await response.json() as { app: { name: string; createdAt: number; owner: string }; key: string; hint: string };
+    
+    printSuccess(`App key rotated for: ${appName}`, {
+      data: {
+        app: result.app,
+        key: result.key,
+        hint: result.hint
+      },
+      nextSteps: [
+        "Store the new key securely - the old key has been revoked",
+        "Update any systems using the old key",
+        "The old key will no longer work"
+      ],
+      docs: ["cli"]
+    });
+    process.exit(0);
+  }
+  
+  // app delete <name>
+  if (subcommand === "delete" || subcommand === "rm" || subcommand === "remove") {
+    handled = true;
+    
+    if (hasFlag(subArgs, "--help", "-h")) {
+      printCommandHelp("app delete", "<name>", [
+        "claw.events app delete myapp"
+      ]);
+    }
+    
+    const appName = subArgs[0];
+    
+    if (!appName) {
+      printError(
+        "Missing app name",
+        [
+          "Run 'claw.events app delete <name>' to remove an app",
+          "Example: claw.events app delete myapp"
+        ],
+        { docs: ["cli"] }
+      );
+    }
+    
+    const token = getEffectiveToken();
+    if (!token) {
+      printError(
+        "Authentication required",
+        [
+          "Run 'claw.events login --user <name>' to authenticate",
+          "Or use --token <jwt> for temporary authentication"
+        ],
+        { docs: ["cli", "authentication"] }
+      );
+    }
+    
+    const response = await apiFetch(`${apiUrl}/api/apps/${appName}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+    
+    if (!response.ok) {
+      if (response.status === 404) {
+        printError(
+          `App '${appName}' not found`,
+          [
+            "Check the app name spelling",
+            "Use 'claw.events app list' to see your apps"
+          ],
+          { docs: ["cli"] }
+        );
+      } else if (response.status === 403) {
+        printError(
+          "Not authorized to delete this app",
+          [
+            "You can only delete apps you own",
+            "Use 'claw.events app list' to see your apps"
+          ],
+          { docs: ["cli"] }
+        );
+      } else {
+        const text = await response.text();
+        printError(
+          `Failed to delete app: ${text}`,
+          [
+            "Check your network connection",
+            "Verify the server is running"
+          ],
+          { docs: ["cli"] }
+        );
+      }
+    }
+    
+    const result = await response.json() as { deleted: boolean; appName: string };
+    
+    printSuccess(`App '${appName}' deleted successfully`, {
+      data: { deleted: result.deleted, appName: result.appName },
+      nextSteps: [
+        "The app and its key have been permanently removed",
+        "The app can no longer publish or access channels",
+        "Use 'claw.events app create <name>' to create a new app"
+      ],
+      docs: ["cli"]
+    });
+    process.exit(0);
+  }
+  
+  // Default: show app subcommands
+  if (!handled) {
+    handled = true;
+    printSuccess("Available app subcommands", {
+      data: {
+        subcommands: [
+          { name: "create", usage: "<name>", description: "Create a new app and get an API key" },
+          { name: "list", usage: "", description: "List all your apps" },
+          { name: "show", usage: "<name>", description: "Show app details (or: get, info)" },
+          { name: "rotate", usage: "<name>", description: "Rotate app key and revoke old one" },
+          { name: "delete", usage: "<name>", description: "Delete an app (or: rm, remove)" }
+        ]
+      },
+      nextSteps: [
+        "Run 'claw.events app <subcommand> --help' for detailed usage",
+        "Apps can publish to app.<name>.* channels and access app.<name>.agent.* channels"
+      ],
+      docs: ["cli"]
+    });
+    process.exit(0);
+  }
+}
+
+// version command - show version information
+if (command === "version") {
+  handled = true;
+  
+  if (hasFlag(args, "--help", "-h")) {
+    printCommandHelp("version", "", [
+      "claw.events version",
+      "claw.events --version"
+    ]);
+    process.exit(0);
+  }
+  
+  if (jsonOutput) {
+    console.log(JSON.stringify({
+      status: "success",
+      version: CLI_VERSION,
+      name: "claw.events"
+    }, null, 2));
+  } else {
+    console.log();
+    console.log(`claw.events version ${CLI_VERSION}`);
+    console.log();
+  }
+  process.exit(0);
 }
 
 // Only print help if no command was handled

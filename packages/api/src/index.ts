@@ -81,10 +81,30 @@ const storeApiKey = async (username: string, apiKey: string): Promise<void> => {
 // Validate an API key against stored hash
 const validateApiKey = async (apiKey: string): Promise<string | null> => {
   try {
-    const { payload } = await jwtVerify<AuthPayload>(apiKey, jwtKey);
+    const { payload } = await jwtVerify<AuthPayload & { type?: string }>(apiKey, jwtKey);
     const username = payload.sub;
     if (!username) return null;
 
+    // Check if this is an app key (starts with "app:")
+    if (isAppPrincipal(username)) {
+      const appName = username.slice(APP_PRINCIPAL_PREFIX.length);
+      const stored = await redis.get(`app_key:${appName}`);
+      if (!stored) return null;
+
+      const { hashedKey } = JSON.parse(stored);
+      const providedHash = hashApiKey(apiKey);
+
+      // Timing-safe comparison
+      if (hashedKey.length !== providedHash.length) return null;
+      const match = crypto.timingSafeEqual(
+        Buffer.from(hashedKey),
+        Buffer.from(providedHash)
+      );
+
+      return match ? username : null;
+    }
+
+    // Regular agent API key
     const stored = await redis.get(`apikey:${username}`);
     if (!stored) return null;
 
@@ -6670,6 +6690,287 @@ function jsonToYaml(obj: unknown, indent = 0): string {
 Bun.serve({
   fetch: app.fetch,
   port
+});
+
+// ============================================================================
+// App Management System
+// ============================================================================
+
+// App naming rules: alphanum + underscore only, no dots, globally unique
+const isValidAppName = (name: string): boolean => {
+  // Must be alphanum + underscore, no dots, 3-32 chars
+  if (!name || name.length < 3 || name.length > 32) return false;
+  return /^[a-zA-Z0-9_]+$/.test(name);
+};
+
+// Check if app name already exists (globally unique)
+const appExists = async (appName: string): Promise<boolean> => {
+  const exists = await redis.exists(`app:${appName}`);
+  return exists === 1;
+};
+
+// Generate a new app API key (JWT format with type: "appkey")
+const generateAppKey = async (appName: string): Promise<string> => {
+  return new SignJWT({ type: "appkey" })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(getAppPrincipal(appName))
+    .setIssuedAt()
+    .sign(jwtKey);
+};
+
+// Store active app key (replaces any existing key)
+const storeAppKey = async (appName: string, appKey: string): Promise<void> => {
+  const hashedKey = hashApiKey(appKey);
+  await redis.set(`app_key:${appName}`, JSON.stringify({
+    hashedKey,
+    createdAt: Date.now()
+  }));
+};
+
+// Delete app key (on rotate or delete)
+const deleteAppKey = async (appName: string): Promise<void> => {
+  await redis.del(`app_key:${appName}`);
+};
+
+// Get app metadata
+const getApp = async (appName: string): Promise<{ name: string; createdAt: number; owner: string } | null> => {
+  const data = await redis.get(`app:${appName}`);
+  if (!data) return null;
+  return JSON.parse(data);
+};
+
+// Get all apps owned by a specific owner
+const getAppsByOwner = async (owner: string): Promise<{ name: string; createdAt: number; owner: string }[]> => {
+  const pattern = "app:*";
+  const keys: string[] = [];
+  let cursor = 0;
+  
+  do {
+    const result = await redis.scan(cursor, { MATCH: pattern, COUNT: 100 });
+    cursor = result.cursor;
+    keys.push(...result.keys);
+  } while (cursor !== 0);
+  
+  const apps = [];
+  for (const key of keys) {
+    const data = await redis.get(key);
+    if (data) {
+      const app = JSON.parse(data);
+      if (app.owner === owner) {
+        apps.push(app);
+      }
+    }
+  }
+  
+  // Sort by createdAt descending
+  apps.sort((a, b) => b.createdAt - a.createdAt);
+  return apps;
+};
+
+// Create a new app
+const createApp = async (appName: string, owner: string): Promise<{ name: string; createdAt: number; owner: string }> => {
+  const app = {
+    name: appName,
+    createdAt: Date.now(),
+    owner
+  };
+  await redis.set(`app:${appName}`, JSON.stringify(app));
+  await redis.sAdd(`owner_apps:${owner}`, appName);
+  return app;
+};
+
+// Delete an app (and its key)
+const deleteApp = async (appName: string, owner: string): Promise<boolean> => {
+  const app = await getApp(appName);
+  if (!app || app.owner !== owner) return false;
+  
+  await redis.del(`app:${appName}`);
+  await redis.del(`app_key:${appName}`);
+  await redis.sRem(`owner_apps:${owner}`, appName);
+  return true;
+};
+
+// ============================================================================
+// App Management API Endpoints
+// ============================================================================
+
+// POST /api/apps - Create a new app
+app.post("/api/apps", async (c) => {
+  let owner: string;
+  try {
+    owner = await requireAuth(c.req.header("authorization"));
+  } catch (error) {
+    return c.json({ error: (error as Error).message }, 401);
+  }
+  
+  const body = await c.req.json<{ name?: string }>();
+  const appName = body?.name?.trim();
+  
+  if (!appName) {
+    return c.json({ error: "app name required" }, 400);
+  }
+  
+  // Validate app name format
+  if (!isValidAppName(appName)) {
+    return c.json({ 
+      error: "invalid app name. must be 3-32 alphanumeric characters or underscores, no dots" 
+    }, 400);
+  }
+  
+  // Check global uniqueness
+  if (await appExists(appName)) {
+    return c.json({ error: "app name already exists" }, 409);
+  }
+  
+  // Create app
+  const app = await createApp(appName, owner);
+  
+  // Generate and store app key
+  const appKey = await generateAppKey(appName);
+  await storeAppKey(appName, appKey);
+  
+  console.log(`[apps/create] Created app ${appName} for owner ${owner}`);
+  
+  return c.json({
+    ok: true,
+    app: {
+      name: app.name,
+      createdAt: app.createdAt,
+      owner: app.owner
+    },
+    key: appKey,
+    hint: "Store this key securely. It will only be shown once on creation and rotation."
+  });
+});
+
+// GET /api/apps - List all apps owned by the current agent
+app.get("/api/apps", async (c) => {
+  let owner: string;
+  try {
+    owner = await requireAuth(c.req.header("authorization"));
+  } catch (error) {
+    return c.json({ error: (error as Error).message }, 401);
+  }
+  
+  const apps = await getAppsByOwner(owner);
+  
+  return c.json({
+    ok: true,
+    apps: apps.map(app => ({
+      name: app.name,
+      createdAt: app.createdAt,
+      owner: app.owner
+    })),
+    count: apps.length
+  });
+});
+
+// GET /api/apps/:app - Get app details
+app.get("/api/apps/:app", async (c) => {
+  let owner: string;
+  try {
+    owner = await requireAuth(c.req.header("authorization"));
+  } catch (error) {
+    return c.json({ error: (error as Error).message }, 401);
+  }
+  
+  const appName = c.req.param("app");
+  
+  const app = await getApp(appName);
+  if (!app) {
+    return c.json({ error: "app not found" }, 404);
+  }
+  
+  // Only owner can view app details
+  if (app.owner !== owner) {
+    return c.json({ error: "not authorized to view this app" }, 403);
+  }
+  
+  return c.json({
+    ok: true,
+    app: {
+      name: app.name,
+      createdAt: app.createdAt,
+      owner: app.owner
+    }
+  });
+});
+
+// POST /api/apps/:app/rotate - Rotate app key
+app.post("/api/apps/:app/rotate", async (c) => {
+  let owner: string;
+  try {
+    owner = await requireAuth(c.req.header("authorization"));
+  } catch (error) {
+    return c.json({ error: (error as Error).message }, 401);
+  }
+  
+  const appName = c.req.param("app");
+  
+  const app = await getApp(appName);
+  if (!app) {
+    return c.json({ error: "app not found" }, 404);
+  }
+  
+  // Only owner can rotate key
+  if (app.owner !== owner) {
+    return c.json({ error: "not authorized to rotate this app's key" }, 403);
+  }
+  
+  // Delete old key
+  await deleteAppKey(appName);
+  
+  // Generate new key
+  const newKey = await generateAppKey(appName);
+  await storeAppKey(appName, newKey);
+  
+  console.log(`[apps/rotate] Rotated key for app ${appName}`);
+  
+  return c.json({
+    ok: true,
+    app: {
+      name: app.name,
+      createdAt: app.createdAt,
+      owner: app.owner
+    },
+    key: newKey,
+    hint: "Store this key securely. The old key has been revoked and will no longer work."
+  });
+});
+
+// DELETE /api/apps/:app - Delete an app
+app.delete("/api/apps/:app", async (c) => {
+  let owner: string;
+  try {
+    owner = await requireAuth(c.req.header("authorization"));
+  } catch (error) {
+    return c.json({ error: (error as Error).message }, 401);
+  }
+  
+  const appName = c.req.param("app");
+  
+  const app = await getApp(appName);
+  if (!app) {
+    return c.json({ error: "app not found" }, 404);
+  }
+  
+  // Only owner can delete
+  if (app.owner !== owner) {
+    return c.json({ error: "not authorized to delete this app" }, 403);
+  }
+  
+  const deleted = await deleteApp(appName, owner);
+  if (!deleted) {
+    return c.json({ error: "failed to delete app" }, 500);
+  }
+  
+  console.log(`[apps/delete] Deleted app ${appName} (owner: ${owner})`);
+  
+  return c.json({
+    ok: true,
+    deleted: true,
+    appName
+  });
 });
 
 console.log(`claw.events api listening on ${port}`);

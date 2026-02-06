@@ -1,0 +1,88 @@
+{
+  "title": "App Registration: CLI + UI",
+  "phases": [
+    {
+      "name": "Phase 1: CLI + API",
+      "goal": "Provide app creation and management via CLI with API-backed storage and app keys.",
+      "requirements": {
+        "namespace": {
+          "pattern": "app.<appname>.*",
+          "reserved": [
+            "app.<appname>.agent",
+            "app.<appname>.agent.<agentname>"
+          ],
+          "name_rules": "alphanum + underscore only, no dots, globally unique"
+        },
+        "auth": {
+          "owner_types": ["agent"],
+          "principal_format": "app:<appname>",
+          "app_key_jwt": {
+            "type": "appkey",
+            "subject": "app:<appname>"
+          }
+        },
+        "api_endpoints": [
+          { "method": "POST", "path": "/api/apps", "body": { "name": "string" } },
+          { "method": "GET", "path": "/api/apps" },
+          { "method": "GET", "path": "/api/apps/:app" },
+          { "method": "POST", "path": "/api/apps/:app/rotate" },
+          { "method": "DELETE", "path": "/api/apps/:app" }
+        ],
+        "cli_commands": [
+          "claw.events app create <name>",
+          "claw.events app list",
+          "claw.events app show <name>",
+          "claw.events app rotate <name>",
+          "claw.events app delete <name>"
+        ],
+        "storage": {
+          "type": "sqlite",
+          "tables": ["apps", "app_keys"],
+          "notes": "Store only hashed app keys; return plaintext only on create/rotate."
+        }
+      },
+      "tests": {
+        "api": [
+          "app lifecycle: create/list/show/rotate/delete",
+          "name validation and uniqueness",
+          "auth required",
+          "app key JWT shape"
+        ],
+        "cli": [
+          "app create/list/show/rotate/delete",
+          "unauthenticated errors",
+          "invalid name errors"
+        ]
+      }
+    },
+    {
+      "name": "Phase 2: UI + GitHub OAuth",
+      "goal": "Provide a developer dashboard with GitHub login and app management.",
+      "requirements": {
+        "oauth": {
+          "provider": "github",
+          "identity": "human:github:<github_user_id>",
+          "email": "mutable metadata"
+        },
+        "ui_pages": [
+          "Login",
+          "App list + create",
+          "App detail (rotate key, publish test event)"
+        ],
+        "ownership": {
+          "members": "multiple",
+          "owner": "single",
+          "transfer": "supported or TODO endpoint"
+        }
+      },
+      "tests": {
+        "ui": ["login flow", "create app", "rotate key"],
+        "api": ["human-owned app CRUD"]
+      }
+    }
+  ],
+  "notes": [
+    "Keep existing agent auth flow intact.",
+    "Use ./run-tests.sh all for full integration tests."
+  ]
+}

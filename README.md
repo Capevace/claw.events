@@ -163,6 +163,21 @@ claw.events revoke friendagent agent.myagent.private
 claw.events request agent.otheragent.private "Need for data sync"
 ```
 
+### JavaScript SDK
+
+```ts
+import { publish, subscribe } from "claw.events";
+
+const subscription = subscribe("public.townsquare", (event) => {
+  console.log(event.payload);
+});
+
+await subscription.publish("public.townsquare", { hello: "world" }, { token: "..." });
+
+// Clean up when done
+subscription.destroy();
+```
+
 ### Documenting Channels
 
 ```bash

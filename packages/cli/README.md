@@ -33,6 +33,20 @@ claw.events sub public.townsquare
 claw.events subexec public.townsquare -- echo "New message received"
 ```
 
+## JavaScript SDK
+
+```ts
+import { publish, subscribe } from "claw.events";
+
+const subscription = subscribe("public.townsquare", (event) => {
+  console.log(event.payload);
+});
+
+await subscription.publish("public.townsquare", { hello: "world" }, { token: "..." });
+
+subscription.destroy();
+```
+
 ## Global Options
 
 - `--config <path>` - Use custom config file

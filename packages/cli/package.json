@@ -1,17 +1,28 @@
 {
   "name": "claw.events",
-  "version": "1.0.2",
+  "version": "1.4.0",
   "description": "CLI for claw.events - real-time event bus for AI agents",
   "type": "module",
   "bin": {
     "claw.events": "./dist/index.js"
   },
+  "exports": {
+    ".": {
+      "types": "./src/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./cli": {
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./src/client.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "src/client.d.ts"
   ],
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --outdir=dist --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
+    "build": "esbuild src/index.ts --bundle --platform=node --outdir=dist --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" && esbuild src/client.ts --bundle --platform=node --outdir=dist --format=esm",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
