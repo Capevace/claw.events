@@ -1,9 +1,12 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { createClient } from "redis";
 import { jwtVerify, SignJWT } from "jose";
 import crypto from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 
 const app = new Hono();
 
@@ -21,8 +24,7 @@ const getCentrifugoApiKey = () => {
   }
   return process.env.CENTRIFUGO_API_KEY ?? "";
 };
-const moltbookApiBase = process.env.MOLTBOOK_API_BASE || "https://www.moltbook.com/api/v1";
-const moltbookApiKey = process.env.MOLTBOOK_API_KEY ?? "";
+const clawkeyApiBase = process.env.CLAWKEY_API_BASE ?? "https://clawkey.org";
 const devMode = process.env.CLAW_DEV_MODE === "true" || process.env.NODE_ENV === "development";
 const statsEnabled = process.env.CLAW_ENABLE_STATS === "true" || devMode;
 
@@ -42,21 +44,13 @@ type AuthPayload = {
 
 const jwtKey = new TextEncoder().encode(jwtSecret);
 
-const createToken = async (username: string) => {
-  return new SignJWT({})
-    .setProtectedHeader({ alg: "HS256" })
-    .setSubject(username)
-    .setIssuedAt()
-    .setExpirationTime("7d")
-    .sign(jwtKey);
-};
 
 // ============================================================================
 // API Key Authentication System
 // ============================================================================
 
-const CLAIM_TTL_SECONDS = 24 * 60 * 60; // 24 hours
-const MAX_CLAIMS_PER_USER = 100;
+const AGENT_CHALLENGE_TTL_SECONDS = 120;
+const AGENT_CHALLENGE_PREFIX = "agent_challenge";
 
 // Hash an API key using SHA-256 for storage
 const hashApiKey = (apiKey: string): string => {
@@ -115,58 +109,101 @@ const revokeApiKey = async (username: string): Promise<void> => {
   await redis.del(`apikey:${username}`);
 };
 
-// Create a claim token for the auth flow
-const createClaim = async (username: string): Promise<string> => {
-  const claimToken = `claim-${crypto.randomBytes(16).toString("base64url")}`;
-  const hashedClaim = hashApiKey(claimToken);
-  const key = `claim:${username}:${hashedClaim}`;
+const createAgentChallenge = async (username: string, keyName: string) => {
+  const nonce = crypto.randomBytes(16).toString("base64url");
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const message = [
+    "claw.events login",
+    `username:${username}`,
+    `key:${keyName}`,
+    `nonce:${nonce}`,
+    `ts:${issuedAt}`
+  ].join("\n");
 
-  const data = {
-    createdAt: Date.now(),
+  const key = `${AGENT_CHALLENGE_PREFIX}:${username}:${keyName}:${nonce}`;
+  await redis.set(key, JSON.stringify({ issuedAt }), { EX: AGENT_CHALLENGE_TTL_SECONDS });
+
+  return {
+    nonce,
+    issuedAt,
+    message
   };
-
-  await redis.set(key, JSON.stringify(data), { EX: CLAIM_TTL_SECONDS });
-  return claimToken;
 };
 
-// Get count of pending claims for a user
-const getPendingClaimsCount = async (username: string): Promise<number> => {
-  const pattern = `claim:${username}:*`;
-  const keys = await redis.keys(pattern);
-  return keys.length;
+const consumeAgentChallenge = async (username: string, keyName: string, nonce: string) => {
+  const key = `${AGENT_CHALLENGE_PREFIX}:${username}:${keyName}:${nonce}`;
+  const data = await redis.get(key);
+  if (!data) return null;
+  await redis.del(key);
+  return JSON.parse(data) as { issuedAt: number };
 };
 
-// Get the oldest claim's expiry time
-const getNextClaimAvailableTime = async (username: string): Promise<number | null> => {
-  const pattern = `claim:${username}:*`;
-  const keys = await redis.keys(pattern);
-
-  if (keys.length === 0) return null;
-
-  let minTtl = Infinity;
-  for (const key of keys) {
-    const ttl = await redis.ttl(key);
-    if (ttl > 0 && ttl < minTtl) {
-      minTtl = ttl;
+const fetchClawkeyPublicKey = async (username: string, keyName: string): Promise<string | null> => {
+  const url = `${clawkeyApiBase}/@${encodeURIComponent(username)}/${encodeURIComponent(keyName)}?format=json`;
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json"
     }
+  });
+  if (!response.ok) {
+    return null;
   }
 
-  return minTtl === Infinity ? null : Date.now() + (minTtl * 1000);
+  const data = await response.json<{
+    public_key?: string;
+    key?: { public_key?: string };
+  }>();
+
+  return data.public_key ?? data.key?.public_key ?? null;
 };
 
-// Validate a claim token and return username if valid
-const validateClaim = async (username: string, claimToken: string): Promise<boolean> => {
-  const hashedClaim = hashApiKey(claimToken);
-  const key = `claim:${username}:${hashedClaim}`;
-  const exists = await redis.exists(key);
-  return exists === 1;
-};
+const verifySshSignature = async (params: {
+  username: string;
+  publicKey: string;
+  signature: string;
+  message: string;
+  namespace: string;
+}): Promise<boolean> => {
+  const tempDir = await mkdtemp(join(tmpdir(), "claw-events-"));
+  const signaturePath = join(tempDir, "signature.sig");
+  const allowedSignersPath = join(tempDir, "allowed_signers");
 
-// Delete a specific claim
-const deleteClaim = async (username: string, claimToken: string): Promise<void> => {
-  const hashedClaim = hashApiKey(claimToken);
-  const key = `claim:${username}:${hashedClaim}`;
-  await redis.del(key);
+  try {
+    const signatureText = params.signature.endsWith("\n")
+      ? params.signature
+      : `${params.signature}\n`;
+
+    await writeFile(signaturePath, signatureText);
+    await writeFile(allowedSignersPath, `${params.username} ${params.publicKey}\n`);
+
+    const valid = await new Promise<boolean>((resolve) => {
+      const child = spawn("ssh-keygen", [
+        "-Y",
+        "verify",
+        "-n",
+        params.namespace,
+        "-f",
+        allowedSignersPath,
+        "-I",
+        params.username,
+        "-s",
+        signaturePath
+      ]);
+
+      child.stdin.write(params.message);
+      child.stdin.end();
+
+      child.on("close", (code) => {
+        resolve(code === 0);
+      });
+
+      child.on("error", () => resolve(false));
+    });
+
+    return valid;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 };
 
 // Authentication middleware - supports both old JWTs (transition) and new API keys
@@ -491,53 +528,33 @@ const getChannelSchema = async (channel: string): Promise<unknown | null> => {
   }
 };
 
-app.post("/auth/init", async (c) => {
-  const body = await c.req.json<{ username?: string }>();
+const agentInitHandler = async (c: Context) => {
+  const body = await c.req.json<{ username?: string; key_name?: string }>();
   const username = body?.username?.trim();
+  const keyName = body?.key_name?.trim() || "main";
+
   if (!username) {
     return c.json({ error: "username required" }, 400);
   }
 
-  // Check if user already has an active API key
-  const existingKey = await redis.get(`apikey:${username}`);
-
-  // Check claim limit
-  const pendingClaims = await getPendingClaimsCount(username);
-  if (pendingClaims >= MAX_CLAIMS_PER_USER) {
-    const nextAvailable = await getNextClaimAvailableTime(username);
-    const retryTimestamp = nextAvailable || Date.now() + (CLAIM_TTL_SECONDS * 1000);
-
-    return c.json({
-      error: "Maximum authentication attempts reached",
-      hint: "You have exhausted your set of temporary authentication tokens. Wait for the tokens to expire before creating new ones.",
-      retry_after_seconds: Math.ceil((retryTimestamp - Date.now()) / 1000),
-      retry_timestamp: retryTimestamp,
-      max_claims: MAX_CLAIMS_PER_USER,
-      pending_claims: pendingClaims
-    }, 429);
+  const publicKey = await fetchClawkeyPublicKey(username, keyName);
+  if (!publicKey) {
+    return c.json({ error: "public key not found" }, 404);
   }
 
-  // Create new claim token
-  const claimToken = await createClaim(username);
-
-  // Create the signature to be placed in MaltBook profile
-  const signature = `claw-sig-${claimToken}`;
-
-  const response: Record<string, unknown> = {
+  return c.json({
     username,
-    claim_token: claimToken,
-    signature,
-    instructions: `Place the signature in your MaltBook profile description: ${signature}`,
-    pending_claims: pendingClaims + 1,
-    max_claims: MAX_CLAIMS_PER_USER
-  };
+    key_name: keyName,
+    ...(await createAgentChallenge(username, keyName)),
+    namespace: "claw.events",
+    expires_at: Date.now() + (AGENT_CHALLENGE_TTL_SECONDS * 1000)
+  });
+};
 
-  // Add note if user already has an active key
-  if (existingKey) {
-    response.note = "You already have an active API key. This will create a new one after verification, invalidating your current key.";
-  }
+app.post("/auth/agent/init", agentInitHandler);
 
-  return c.json(response);
+app.post("/auth/init", async (c) => {
+  return agentInitHandler(c);
 });
 
 app.post("/auth/dev-register", async (c) => {
@@ -561,97 +578,74 @@ app.post("/auth/dev-register", async (c) => {
   });
 });
 
-app.post("/auth/verify", async (c) => {
-  const body = await c.req.json<{ username?: string; claim_token?: string }>();
+const agentVerifyHandler = async (c: Context) => {
+  const body = await c.req.json<{
+    username?: string;
+    key_name?: string;
+    nonce?: string;
+    signature?: string;
+  }>();
   const username = body?.username?.trim();
-  const claimToken = body?.claim_token?.trim();
+  const keyName = body?.key_name?.trim() || "main";
+  const nonce = body?.nonce?.trim();
+  const signature = body?.signature?.trim();
 
   if (!username) {
     return c.json({ error: "username required" }, 400);
   }
 
-  if (!claimToken) {
-    return c.json({ error: "claim_token required" }, 400);
+  if (!nonce) {
+    return c.json({ error: "nonce required" }, 400);
   }
 
-  // Validate the claim token
-  const isValidClaim = await validateClaim(username, claimToken);
-  if (!isValidClaim) {
-    return c.json({ error: "invalid or expired claim token" }, 400);
+  if (!signature) {
+    return c.json({ error: "signature required" }, 400);
   }
 
-  // Reconstruct the signature from the claim token
-  const signature = `claw-sig-${claimToken}`;
-
-  if (!moltbookApiKey) {
-    console.warn("[auth/verify] Moltbook API key missing", { username });
-    return c.json({ error: "MOLTBOOK_API_KEY not configured" }, 500);
+  const challenge = await consumeAgentChallenge(username, keyName, nonce);
+  if (!challenge) {
+    return c.json({ error: "invalid or expired challenge" }, 400);
   }
 
-  console.log("[auth/verify] Using Moltbook API", {
+  const message = [
+    "claw.events login",
+    `username:${username}`,
+    `key:${keyName}`,
+    `nonce:${nonce}`,
+    `ts:${challenge.issuedAt}`
+  ].join("\n");
+
+  const publicKey = await fetchClawkeyPublicKey(username, keyName);
+  if (!publicKey) {
+    return c.json({ error: "public key not found" }, 404);
+  }
+
+  const valid = await verifySshSignature({
     username,
-    apiBase: moltbookApiBase,
-    hasApiKey: true
+    publicKey,
+    signature,
+    message,
+    namespace: "claw.events"
   });
 
-  const apiUrl = `${moltbookApiBase}/agents/profile?name=${encodeURIComponent(username)}`;
-  const response = await fetch(apiUrl, {
-    headers: {
-      Authorization: `Bearer ${moltbookApiKey}`,
-      Accept: "application/json"
-    }
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text().catch(() => "<unreadable>");
-    console.error("[auth/verify] Moltbook API fetch failed", {
-      username,
-      status: response.status,
-      statusText: response.statusText,
-      body: errorBody
-    });
-    return c.json({ error: `profile fetch failed (${response.status})` }, 502);
+  if (!valid) {
+    return c.json({ error: "signature verification failed" }, 401);
   }
 
-  const profile = await response.json<{
-    success?: boolean;
-    agent?: { description?: string };
-  }>();
-
-  if (profile?.success === false) {
-    console.error("[auth/verify] MaltBook API returned success=false", {
-      username,
-      profile
-    });
-  }
-
-  const description = profile?.agent?.description ?? "";
-  const signatureFound = description.includes(signature);
-
-  if (!signatureFound) {
-    console.warn("[auth/verify] Signature not found in profile description", {
-      username
-    });
-    return c.json({ error: "signature not found in profile" }, 401);
-  }
-
-  // Delete the claim (one-time use)
-  await deleteClaim(username, claimToken);
-
-  // Generate and store the new API key
   const apiKey = await generateApiKey(username);
   await storeApiKey(username, apiKey);
-
-  console.log("[auth/verify] Authentication successful, API key created", {
-    username,
-    hadPreviousKey: !!(await redis.get(`apikey:${username}`))
-  });
 
   return c.json({
     token: apiKey,
     username,
     hint: "This is your API key. Store it securely. If you lose it, run 'claw.events login' again to authenticate and get a new one."
   });
+};
+
+app.post("/auth/agent/verify", agentVerifyHandler);
+
+app.post("/auth/verify", async (c) => {
+  return agentVerifyHandler(c);
 });
 
 // Revoke endpoint - invalidates current API key (requires re-authentication)

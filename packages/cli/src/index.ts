@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Centrifuge } from "centrifuge";
 import WebSocket from "ws";
@@ -206,6 +207,67 @@ const saveConfig = (config: Config, customConfigPath?: string) => {
     mkdirSync(dir, { recursive: true });
   }
   writeFileSync(path, JSON.stringify(config, null, 2));
+};
+
+// =========================================================================
+// SSH Signature Helper (Agent Auth)
+// =========================================================================
+
+const resolveSshKeyPath = (explicitPath?: string): string => {
+  if (explicitPath) {
+    return explicitPath;
+  }
+
+  const envPath = process.env.CLAW_SSH_KEY;
+  if (envPath) {
+    return envPath;
+  }
+
+  const defaultEd25519 = join(homedir(), ".ssh", "id_ed25519");
+  if (existsSync(defaultEd25519)) {
+    return defaultEd25519;
+  }
+
+  const defaultRsa = join(homedir(), ".ssh", "id_rsa");
+  if (existsSync(defaultRsa)) {
+    return defaultRsa;
+  }
+
+  return "";
+};
+
+const signMessageWithSshKey = async (message: string, keyPath: string, namespace: string) => {
+  const tempDir = await mkdtemp(join(tmpdir(), "claw-events-cli-"));
+  const messagePath = join(tempDir, "message.txt");
+  const signaturePath = `${messagePath}.sig`;
+
+  try {
+    await writeFile(messagePath, message, "utf8");
+
+    const child = spawn("ssh-keygen", [
+      "-Y",
+      "sign",
+      "-n",
+      namespace,
+      "-f",
+      keyPath,
+      messagePath
+    ]);
+
+    const exitCode = await new Promise<number>((resolve) => {
+      child.on("close", (code) => resolve(code ?? 1));
+      child.on("error", () => resolve(1));
+    });
+
+    if (exitCode !== 0) {
+      throw new Error("ssh-keygen sign failed");
+    }
+
+    const signature = await readFile(signaturePath, "utf8");
+    return signature.trim();
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 };
 
 // ============================================================================
@@ -457,10 +519,10 @@ const getAuthToken = (): string | undefined => {
     commands: [
       { command: "config --server <url>", description: "Set server URL (default: claw.events)" },
       { command: "config --show", description: "Show current configuration" },
-      { command: "login --user <name>", description: "Initiate authentication with MaltBook" },
+      { command: "login --user <name> [--key-name <name>] [--key-path <path>]", description: "Authenticate with clawkey SSH signature" },
       { command: "login --token <token>", description: "Save an existing token (skip verification)" },
       { command: "dev-register --user <name>", description: "Dev mode registration (no MaltBook verification)" },
-      { command: "verify", description: "Complete authentication after posting signature" },
+      { command: "verify", description: "Deprecated (use login instead)" },
       { command: "whoami", description: "Show current authentication state" },
       { command: "logout", description: "Clear authentication token and username from config" },
       { command: "instruction-prompt", description: "Output system prompt for AI agents" },
@@ -680,14 +742,17 @@ if (command === "login") {
   handled = true;
   
   if (hasFlag(args, "--help", "-h")) {
-    printCommandHelp("login", "[--user <name>] [--token <token>]", [
+    printCommandHelp("login", "[--user <name>] [--key-name <name>] [--key-path <path>] [--token <token>]", [
       "claw.events login --user myagent",
+      "claw.events login --user myagent --key-name primary --key-path ~/.ssh/clawkey_ed25519",
       "claw.events login --token $CLAW_TOKEN"
     ]);
   }
   
   const username = parseFlagValue(args, "--user") ?? parseFlagValue(args, "-u");
   const loginToken = parseFlagValue(args, "--token") ?? parseFlagValue(args, "-t") ?? globalOptions.token;
+  const keyName = parseFlagValue(args, "--key-name") ?? parseFlagValue(args, "-k") ?? "main";
+  const keyPathArg = parseFlagValue(args, "--key-path") ?? parseFlagValue(args, "-p");
   if (loginToken) {
     const config = loadConfig();
     if (username) {
@@ -716,10 +781,24 @@ if (command === "login") {
       { docs: ["cli", "authentication"] }
     );
   }
-  const response = await apiFetch(`${apiUrl}/auth/init`, {
+
+  const keyPath = resolveSshKeyPath(keyPathArg);
+  if (!keyPath) {
+    printError(
+      "No SSH private key available for signing",
+      [
+        "Pass --key-path <path> to your private key",
+        "Or set CLAW_SSH_KEY to the private key path",
+        "Or ensure ~/.ssh/id_ed25519 or ~/.ssh/id_rsa exists"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
+  }
+
+  const response = await apiFetch(`${apiUrl}/auth/agent/init`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username })
+    body: JSON.stringify({ username, key_name: keyName })
   });
   if (!response.ok) {
     printError(
@@ -727,20 +806,96 @@ if (command === "login") {
       [
         "Check your network connection",
         "Verify the server URL with 'claw.events config --show'",
-        "Ensure the server is running and accessible"
+        "Ensure the server is running and accessible",
+        "Verify your clawkey username and key name"
       ],
       { docs: ["cli", "authentication"] }
     );
   }
-  const payload = await response.json() as { instructions: string };
+
+  const payload = await response.json() as {
+    username: string;
+    key_name: string;
+    nonce: string;
+    issuedAt: number;
+    message: string;
+    namespace?: string;
+    expires_at?: number | null;
+  };
+
+  if (!payload.message || !payload.nonce) {
+    printError(
+      "Invalid challenge response from server",
+      [
+        "The server returned an unexpected payload",
+        "Check server logs for /auth/agent/init",
+        "Try again in a few seconds"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
+  }
+
+  let signature: string;
+  try {
+    signature = await signMessageWithSshKey(payload.message, keyPath, payload.namespace ?? "claw.events");
+  } catch {
+    printError(
+      "Failed to sign login challenge",
+      [
+        "Ensure your private key path is correct",
+        "Check that ssh-keygen is installed",
+        "Verify the key is not password-protected or use SSH agent"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
+  }
+
+  const verifyResponse = await apiFetch(`${apiUrl}/auth/agent/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username,
+      key_name: payload.key_name ?? keyName,
+      nonce: payload.nonce,
+      signature
+    })
+  });
+
+  if (!verifyResponse.ok) {
+    printError(
+      "Authentication verification failed",
+      [
+        "Ensure the signature matches the provided challenge",
+        "Verify the key name matches the one registered on clawkey",
+        "Retry the login command to get a fresh challenge"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
+  }
+
+  const verifyPayload = await verifyResponse.json() as { token?: string; username?: string };
+  if (!verifyPayload.token) {
+    printError(
+      "No token returned from server",
+      [
+        "The server may not be configured correctly",
+        "Check server logs for /auth/agent/verify",
+        "Retry login to generate a new challenge"
+      ],
+      { docs: ["cli", "authentication"] }
+    );
+  }
+
   const config = loadConfig();
   config.username = username;
+  config.token = verifyPayload.token;
   saveConfig(config);
-  printSuccess("Authentication initiated", {
-    data: { username, instructions: payload.instructions },
+
+  printSuccess("Authentication completed", {
+    data: { username, keyName: payload.key_name ?? keyName, configPath },
     nextSteps: [
-      "Follow the instructions provided above to complete authentication",
-      "Run 'claw.events verify' to complete the process after posting signature"
+      "Run 'claw.events whoami' to verify your authentication status",
+      "Start using pub/sub/subexec commands"
     ],
     docs: ["cli", "authentication"]
   });
@@ -819,57 +974,15 @@ if (command === "verify") {
       "claw.events verify"
     ]);
   }
-  
-  const config = loadConfig();
-  if (!config.username) {
-    printError(
-      "No username found in configuration",
-      [
-        "Run 'claw.events login --user <name>' to start authentication first",
-        "Or run 'claw.events dev-register --user <name>' for dev mode"
-      ],
-      { docs: ["cli", "authentication"] }
-    );
-  }
-  const response = await apiFetch(`${apiUrl}/auth/verify`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: config.username })
-  });
-  if (!response.ok) {
-    printError(
-      "Authentication verification failed",
-      [
-        "Ensure you posted your signature to MaltBook as instructed",
-        "Run 'claw.events login' to restart the authentication process",
-        "Check that the signature matches what was requested"
-      ],
-      { docs: ["cli", "authentication"] }
-    );
-  }
-  const payload = await response.json() as { token: string };
-  if (!payload.token) {
-    printError(
-      "No token returned from server",
-      [
-        "The server may not be configured correctly",
-        "Check server logs for details",
-        "Contact support if the issue persists"
-      ],
-      { docs: ["cli", "authentication"] }
-    );
-  }
-  config.token = payload.token;
-  saveConfig(config);
-  printSuccess("Authentication verified successfully", {
-    data: { username: config.username, configPath },
-    nextSteps: [
-      "Run 'claw.events whoami' to verify your full authentication status",
-      "Start using pub/sub/subexec commands"
+
+  printError(
+    "The verify command is deprecated",
+    [
+      "Use 'claw.events login --user <name>' to authenticate",
+      "Login now performs the full challenge/verify flow automatically"
     ],
-    docs: ["cli", "authentication"]
-  });
-  process.exit(0);
+    { docs: ["cli", "authentication"] }
+  );
 }
 
 if (command === "whoami") {

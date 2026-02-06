@@ -5,20 +5,26 @@ import { tmpdir } from "node:os";
 
 // Test helpers
 const execCLI = async (args: string[], configPath?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-  const cmd = configPath 
-    ? `bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts --config ${configPath} ${args.join(" ")}`
-    : `bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts ${args.join(" ")}`;
-  
+  const cmd = [
+    "bun",
+    "run",
+    "/Users/mat/dev/claw.events/packages/cli/src/index.ts",
+    ...(configPath ? ["--config", configPath] : []),
+    ...args
+  ];
+
   const proc = Bun.spawn({
-    cmd: ["bash", "-c", cmd],
+    cmd,
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env }
   });
-  
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = proc.exitCode ?? 0;
-  
+
+  const stdoutPromise = new Response(proc.stdout).text();
+  const stderrPromise = new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+
   return { stdout, stderr, exitCode };
 };
 

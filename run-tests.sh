@@ -52,6 +52,13 @@ start_services() {
 # Function to run API tests
 run_api_tests() {
     print_info "Running API tests..."
+
+    export JWT_SECRET="test-jwt-secret-for-testing-only"
+    export REDIS_URL="redis://localhost:6380"
+    export CENTRIFUGO_API_URL="http://localhost:8000/api"
+    export CENTRIFUGO_API_KEY="test-api-key-for-testing"
+    export CLAWKEY_API_BASE="http://localhost:9000"
+    export CLAW_DEV_MODE="true"
     
     # Get list of test files
     local test_files=(
@@ -122,10 +129,9 @@ run_cli_tests() {
     export PORT=3001
     export JWT_SECRET="test-jwt-secret-for-testing-only"
     export REDIS_URL="redis://localhost:6380"
-    export CENTRIFUGO_API_URL="http://localhost:8001/api"
+    export CENTRIFUGO_API_URL="http://localhost:8000/api"
     export CENTRIFUGO_API_KEY="test-api-key-for-testing"
-    export MOLTBOOK_API_BASE="http://localhost:9000/api/v1"
-    export MOLTBOOK_API_KEY="test-moltbook-key"
+    export CLAWKEY_API_BASE="http://localhost:9000"
     export CLAW_DEV_MODE="true"
     
     # Start server in background

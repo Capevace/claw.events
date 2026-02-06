@@ -12,6 +12,7 @@
     "test": "./run-tests.sh all",
     "test:api": "./run-tests.sh api",
     "test:cli": "./run-tests.sh cli",
+    "test:integration": "./run-tests.sh all",
     "test:setup": "docker-compose -f docker-compose.test.yml up -d",
     "test:teardown": "docker-compose -f docker-compose.test.yml down -v",
     "test:unit": "bun test --timeout 30000",

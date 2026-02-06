@@ -5,22 +5,34 @@ import { tmpdir } from "node:os";
 
 const TEST_API_URL = "http://localhost:3001";
 
+const registerUser = async (username: string, configDir: string) => {
+  const { exitCode } = await execCLI(["dev-register", "--user", username], configDir);
+  if (exitCode !== 0) {
+    throw new Error(`Failed to register ${username}`);
+  }
+};
+
 const execCLI = async (args: string[], configPath?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-  const env = `CLAW_API_URL=${TEST_API_URL}`;
-  const cmd = configPath 
-    ? `${env} bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts --config ${configPath} ${args.join(" ")}`
-    : `${env} bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts ${args.join(" ")}`;
-  
+  const cmd = [
+    "bun",
+    "run",
+    "/Users/mat/dev/claw.events/packages/cli/src/index.ts",
+    ...(configPath ? ["--config", configPath] : []),
+    ...args
+  ];
+
   const proc = Bun.spawn({
-    cmd: ["bash", "-c", cmd],
+    cmd,
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, CLAW_API_URL: TEST_API_URL }
   });
-  
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = proc.exitCode ?? 0;
-  
+
+  const stdoutPromise = new Response(proc.stdout).text();
+  const stderrPromise = new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+
   return { stdout, stderr, exitCode };
 };
 
@@ -40,9 +52,7 @@ describe("CLI Publish Commands", () => {
   });
 
   it("Test 24.1: pub - String Message", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     const { stdout, exitCode } = await execCLI(["pub", "public.test", "hello world"], testDir);
     if (exitCode === 0) {
       const output = JSON.parse(stdout);
@@ -51,9 +61,7 @@ describe("CLI Publish Commands", () => {
   });
 
   it("Test 24.2: pub - JSON Message Auto-Parsed", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     const { stdout, exitCode } = await execCLI(["pub", "agent.testuser.data", '{"key":"value"}'], testDir);
     if (exitCode === 0) {
       const output = JSON.parse(stdout);
@@ -62,9 +70,7 @@ describe("CLI Publish Commands", () => {
   });
 
   it("Test 24.3: pub - No Message (Null Payload)", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     const { stdout, exitCode } = await execCLI(["pub", "public.test"], testDir);
     if (exitCode === 0) {
       const output = JSON.parse(stdout);
@@ -73,9 +79,6 @@ describe("CLI Publish Commands", () => {
   });
 
   it("Test 24.4: pub - Missing Channel", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
     const { stderr, exitCode } = await execCLI(["pub"], testDir);
     expect(exitCode).toBe(1);
     const output = JSON.parse(stderr);
@@ -90,9 +93,7 @@ describe("CLI Publish Commands", () => {
   });
 
   it("Test 24.6: pub - Rate Limited (429)", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "rateuser", token: "eyJ.test"
-    }));
+    await registerUser("rateuser", testDir);
     
     // First publish
     await execCLI(["pub", "public.rate", "msg1"], testDir);
@@ -108,9 +109,7 @@ describe("CLI Publish Commands", () => {
   });
 
   it("Test 24.7: pub - Permission Denied (403)", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "unauthorized", token: "eyJ.test"
-    }));
+    await registerUser("unauthorized", testDir);
     const { stderr, exitCode } = await execCLI(["pub", "agent.other.data", "hello"], testDir);
     expect([0, 1]).toContain(exitCode);
     if (exitCode === 1) {
@@ -119,9 +118,7 @@ describe("CLI Publish Commands", () => {
   });
 
   it("Test 24.8: pub - System Channel Denied", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     const { stderr, exitCode } = await execCLI(["pub", "system.timer.test", "hello"], testDir);
     expect(exitCode).toBe(1);
     expect(stderr).toContain("error");
@@ -129,9 +126,7 @@ describe("CLI Publish Commands", () => {
 
   it("Test 24.9: pub - Network Error", async () => {
     const badEnv = `CLAW_API_URL=http://invalid-server:9999`;
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     
     const proc = Bun.spawn({
       cmd: ["bash", "-c", `${badEnv} bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts --config ${testDir} pub public.test hello`],
@@ -139,8 +134,9 @@ describe("CLI Publish Commands", () => {
       stderr: "pipe",
     });
     
-    const stderr = await new Response(proc.stderr).text();
-    const exitCode = proc.exitCode ?? 0;
+    const stderrPromise = new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    const stderr = await stderrPromise;
     
     expect(exitCode).toBe(1);
     expect(stderr).toContain("error");
@@ -154,7 +150,7 @@ describe("CLI Publish Commands", () => {
     
     if (exitCode === 0) {
       const output = JSON.parse(stdout);
-      expect(output.status).toBe("success");
+      expect(output).toEqual({ temp: 25 });
     }
   });
 
@@ -170,9 +166,7 @@ describe("CLI Publish Commands", () => {
   });
 
   it("Test 24.12: validate - From Channel Schema", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     
     // First advertise channel with schema
     await execCLI([
@@ -196,13 +190,14 @@ describe("CLI Publish Commands", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    
-    const stdout = await new Response(proc.stdout).text();
-    const exitCode = proc.exitCode ?? 0;
-    
+
+    const stdoutPromise = new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    const stdout = await stdoutPromise;
+
     if (exitCode === 0) {
       const output = JSON.parse(stdout);
-      expect(output.status).toBe("success");
+      expect(output).toEqual({ temp: 25 });
     }
   });
 
@@ -237,10 +232,10 @@ describe("CLI Publish Commands", () => {
 
   it("Test 24.17: validate - No Schema (Pass Through)", async () => {
     const { stdout, exitCode } = await execCLI(["validate", '{"a":1}'], testDir);
-    
+
     if (exitCode === 0) {
       const output = JSON.parse(stdout);
-      expect(output.data).toEqual({ a: 1 });
+      expect(output).toEqual({ a: 1 });
     }
   });
 });

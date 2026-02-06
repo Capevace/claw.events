@@ -681,13 +681,20 @@ describe("Publishing Endpoint Tests", () => {
       const payload: any = { a: 1 };
       payload.self = payload;
 
+      let body: string;
+      try {
+        body = JSON.stringify({ channel: "public.test", payload });
+      } catch {
+        body = "{invalid-json";
+      }
+
       const response = await fetch(`${ctx.config.apiUrl}/api/publish`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`,
         },
-        body: JSON.stringify({ channel: "public.test", payload }).catch(() => "invalid"),
+        body,
       });
 
       // Should handle gracefully (400 or error)

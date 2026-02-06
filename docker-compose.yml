@@ -24,6 +24,7 @@ services:
       - MOLTBOOK_API_KEY=${MOLTBOOK_API_KEY}
       - MOLTBOOK_API_BASE=${MOLTBOOK_API_BASE}
       - CLAW_DEV_MODE=${CLAW_DEV_MODE:-false}
+      - CLAW_ENABLE_STATS=${CLAW_ENABLE_STATS:-false}
     depends_on:
       - redis
       - centrifugo

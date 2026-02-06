@@ -4,24 +4,42 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const TEST_API_URL = "http://localhost:3001";
-const TEST_WS_URL = "ws://localhost:8001";
+const TEST_WS_URL = "ws://localhost:8000";
+
+const getDevToken = async (username: string) => {
+  const response = await fetch(`${TEST_API_URL}/auth/dev-register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username })
+  });
+  const body = await response.json() as { token?: string };
+  if (!body.token) {
+    throw new Error(`Failed to get token for ${username}`);
+  }
+  return body.token;
+};
 
 const execCLI = async (args: string[], configPath?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-  const env = `CLAW_API_URL=${TEST_API_URL} CLAW_WS_URL=${TEST_WS_URL}`;
-  const cmd = configPath 
-    ? `${env} bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts --config ${configPath} ${args.join(" ")}`
-    : `${env} bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts ${args.join(" ")}`;
-  
+  const cmd = [
+    "bun",
+    "run",
+    "/Users/mat/dev/claw.events/packages/cli/src/index.ts",
+    ...(configPath ? ["--config", configPath] : []),
+    ...args
+  ];
+
   const proc = Bun.spawn({
-    cmd: ["bash", "-c", cmd],
+    cmd,
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, CLAW_API_URL: TEST_API_URL, CLAW_WS_URL: TEST_WS_URL }
   });
-  
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = proc.exitCode ?? 0;
-  
+
+  const stdoutPromise = new Response(proc.stdout).text();
+  const stderrPromise = new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+
   return { stdout, stderr, exitCode };
 };
 
@@ -40,20 +58,24 @@ describe("E2E Integration Tests", () => {
     try { rmSync(join(testDir, "config.json"), { force: true }); } catch {}
   });
 
-  it("Test 28.1: Full Auth Flow - Production (Mocked)", async () => {
-    // 1. Login
-    const { stdout: loginOut, exitCode: loginExit } = await execCLI(["login", "--user", "e2euser"], testDir);
-    expect([0, 1]).toContain(loginExit); // May fail if server not available
-    
-    if (loginExit === 0) {
-      const loginOutput = JSON.parse(loginOut);
-      expect(loginOutput.status).toBe("success");
-      
-      // 2. Whoami - not yet verified
-      const { stdout: whoamiOut } = await execCLI(["whoami"], testDir);
-      const whoamiOutput = JSON.parse(whoamiOut);
-      expect(whoamiOutput.data.username).toBe("e2euser");
-    }
+  it("Test 28.1: Auth Flow - Token Login", async () => {
+    const token = await getDevToken("e2euser");
+
+    const { stdout: loginOut, exitCode: loginExit } = await execCLI([
+      "login",
+      "--user",
+      "e2euser",
+      "--token",
+      token
+    ], testDir);
+    expect(loginExit).toBe(0);
+
+    const loginOutput = JSON.parse(loginOut);
+    expect(loginOutput.status).toBe("success");
+
+    const { stdout: whoamiOut } = await execCLI(["whoami"], testDir);
+    const whoamiOutput = JSON.parse(whoamiOut);
+    expect(whoamiOutput.data.username).toBe("e2euser");
   });
 
   it("Test 28.2: Full Auth Flow - Dev Mode", async () => {
@@ -171,7 +193,7 @@ describe("E2E Integration Tests", () => {
     expect(exitCode).toBe(0);
     
     const output = JSON.parse(stdout);
-    expect(Array.isArray(output.data.channels)).toBe(true);
+    expect(output.data.channelsByAgent).toBeDefined();
   });
 
   it("Test 28.8: Rate Limit Recovery", async () => {

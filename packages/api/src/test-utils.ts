@@ -50,8 +50,7 @@ export interface TestConfig {
   redisUrl: string;
   centrifugoApiUrl: string;
   centrifugoApiKey: string;
-  moltbookApiBase: string;
-  moltbookApiKey: string;
+  clawkeyApiBase: string;
   devMode: string;
 }
 
@@ -59,7 +58,8 @@ export interface TestConfig {
  * Create a test configuration with dynamic port
  */
 export const createTestConfig = (overrides: Partial<TestConfig> = {}): TestConfig => {
-  const port = overrides.port ?? getNextPort();
+  const envPort = process.env.PORT ? Number(process.env.PORT) : undefined;
+  const port = overrides.port ?? envPort ?? getNextPort();
   return {
     port,
     apiUrl: overrides.apiUrl ?? `http://localhost:${port}`,
@@ -69,8 +69,7 @@ export const createTestConfig = (overrides: Partial<TestConfig> = {}): TestConfi
     centrifugoApiKey: overrides.centrifugoApiKey !== undefined
       ? overrides.centrifugoApiKey
       : (process.env.CENTRIFUGO_API_KEY || "test-api-key-for-testing"),
-    moltbookApiBase: overrides.moltbookApiBase ?? (process.env.MOLTBOOK_API_BASE || "http://localhost:9000/api/v1"),
-    moltbookApiKey: overrides.moltbookApiKey ?? (process.env.MOLTBOOK_API_KEY || "test-moltbook-key"),
+    clawkeyApiBase: overrides.clawkeyApiBase ?? (process.env.CLAWKEY_API_BASE || "http://localhost:9000"),
     devMode: overrides.devMode ?? "true",
   };
 };
@@ -82,9 +81,9 @@ export interface TestContext {
   config: TestConfig;
   server: Server | null;
   redis: RedisClientType | null;
-  moltbookMockServer: Server | null;
+  clawkeyMockServer: Server | null;
   originalEnv: Record<string, string | undefined>;
-  expectedSignatures: Map<string, string>;
+  publicKeys: Map<string, Map<string, string>>;
 }
 
 /**
@@ -102,8 +101,7 @@ export const createTestContext = async (overrides: Partial<TestConfig> = {}): Pr
   process.env.REDIS_URL = config.redisUrl;
   process.env.CENTRIFUGO_API_URL = config.centrifugoApiUrl;
   process.env.CENTRIFUGO_API_KEY = config.centrifugoApiKey;
-  process.env.MOLTBOOK_API_BASE = config.moltbookApiBase;
-  process.env.MOLTBOOK_API_KEY = config.moltbookApiKey;
+  process.env.CLAWKEY_API_BASE = config.clawkeyApiBase;
   process.env.CLAW_DEV_MODE = config.devMode;
   
   // Connect to Redis
@@ -114,64 +112,43 @@ export const createTestContext = async (overrides: Partial<TestConfig> = {}): Pr
     config,
     server: null,
     redis,
-    moltbookMockServer: null,
+    clawkeyMockServer: null,
     originalEnv,
-    expectedSignatures: new Map(),
+    publicKeys: new Map(),
   };
 };
 
 /**
  * Start the mock MoltBook API server for testing auth flows
  */
-export const startMoltbookMockServer = async (context: TestContext, port: number = 9000): Promise<void> => {
-  context.moltbookMockServer = Bun.serve({
+export const startClawkeyMockServer = async (context: TestContext, port: number = 9000): Promise<void> => {
+  context.clawkeyMockServer = Bun.serve({
     port,
     fetch(req) {
       const url = new URL(req.url);
 
-      // Handle agents/profile endpoint
-      if (url.pathname === "/api/v1/agents/profile") {
-        const name = url.searchParams.get("name");
-        if (!name) {
-          return new Response(
-            JSON.stringify({ success: false, error: "Name required" }),
-            { status: 400, headers: { "Content-Type": "application/json" } }
-          );
-        }
+      const match = url.pathname.match(/^\/@([^/]+)\/(.+)$/);
+      if (match) {
+        const username = decodeURIComponent(match[1]);
+        const keyName = decodeURIComponent(match[2]);
 
-        // Check if we have an expected signature for this user
-        const expectedSig = context.expectedSignatures.get(name);
+        const userKeys = context.publicKeys.get(username) ?? context.publicKeys.get("*");
+        const publicKey = userKeys?.get(keyName);
 
-        // Handle special error cases
-        if (expectedSig === "__ERROR_500__") {
+        if (!publicKey) {
           return new Response(
-            JSON.stringify({ error: "Internal Server Error" }),
-            { status: 500, headers: { "Content-Type": "application/json" } }
-          );
-        }
-
-        // If no expected signature set, return 404 (user not found)
-        if (expectedSig === undefined) {
-          return new Response(
-            JSON.stringify({ error: "Agent not found" }),
+            JSON.stringify({ error: "key not found" }),
             { status: 404, headers: { "Content-Type": "application/json" } }
           );
         }
 
-        // Return profile with expected signature in description
         return new Response(
-          JSON.stringify({
-            success: true,
-            agent: {
-              name,
-              description: `Test profile with ${expectedSig}`,
-            },
-          }),
+          JSON.stringify({ public_key: publicKey }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       }
 
-      return new Response("Not found", { status: 404 });
+      return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
     },
   });
   
@@ -209,9 +186,9 @@ export const cleanupTestContext = async (context: TestContext): Promise<void> =>
     context.server = null;
   }
   
-  if (context.moltbookMockServer) {
-    context.moltbookMockServer.stop();
-    context.moltbookMockServer = null;
+  if (context.clawkeyMockServer) {
+    context.clawkeyMockServer.stop();
+    context.clawkeyMockServer = null;
   }
   
   if (context.redis) {
@@ -326,6 +303,10 @@ export const mockFetch = (
 ) => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (/^https?:\/\/(localhost|127\.0\.0\.1):3\d{3}\b/.test(url)) {
+      return originalFetch(input, init);
+    }
     return implementation(input, init);
   };
   return {

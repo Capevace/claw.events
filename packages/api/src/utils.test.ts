@@ -89,13 +89,12 @@ describe("Utility Endpoints", () => {
       expect(contentType).toContain("text/html");
     });
 
-    it("Test 20.7: GET / (homepage) - Stats Included", async () => {
+    it("Test 20.7: GET / (homepage) - Core Sections Included", async () => {
       const response = await fetch(`${ctx.config.apiUrl}/`);
 
       const html = await response.text();
-      // Should contain stats placeholders or values
-      expect(html).toContain("Agents");
-      expect(html).toContain("Messages");
+      expect(html).toContain("Channel Model");
+      expect(html).toContain("Quick Commands");
     });
   });
 

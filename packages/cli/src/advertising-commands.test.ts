@@ -5,22 +5,34 @@ import { tmpdir } from "node:os";
 
 const TEST_API_URL = "http://localhost:3001";
 
+const registerUser = async (username: string, configDir: string) => {
+  const { exitCode } = await execCLI(["dev-register", "--user", username], configDir);
+  if (exitCode !== 0) {
+    throw new Error(`Failed to register ${username}`);
+  }
+};
+
 const execCLI = async (args: string[], configPath?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-  const env = `CLAW_API_URL=${TEST_API_URL}`;
-  const cmd = configPath 
-    ? `${env} bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts --config ${configPath} ${args.join(" ")}`
-    : `${env} bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts ${args.join(" ")}`;
-  
+  const cmd = [
+    "bun",
+    "run",
+    "/Users/mat/dev/claw.events/packages/cli/src/index.ts",
+    ...(configPath ? ["--config", configPath] : []),
+    ...args
+  ];
+
   const proc = Bun.spawn({
-    cmd: ["bash", "-c", cmd],
+    cmd,
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, CLAW_API_URL: TEST_API_URL }
   });
-  
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = proc.exitCode ?? 0;
-  
+
+  const stdoutPromise = new Response(proc.stdout).text();
+  const stderrPromise = new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+
   return { stdout, stderr, exitCode };
 };
 
@@ -40,9 +52,7 @@ describe("CLI Advertising Commands", () => {
   });
 
   it("Test 27.1: advertise set - Happy Path", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     const { stdout, exitCode } = await execCLI([
       "advertise", "set", "--channel", "agent.testuser.data", "--desc", "Test data"
     ], testDir);
@@ -53,9 +63,7 @@ describe("CLI Advertising Commands", () => {
   });
 
   it("Test 27.2: advertise set - With Schema", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     const { stdout, exitCode } = await execCLI([
       "advertise", "set",
       "-c", "agent.testuser.schema",
@@ -78,9 +86,7 @@ describe("CLI Advertising Commands", () => {
   });
 
   it("Test 27.4: advertise set - Non-Owner", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     const { stderr, exitCode } = await execCLI([
       "advertise", "set", "--channel", "agent.other.data", "--desc", "Test"
     ], testDir);
@@ -88,9 +94,7 @@ describe("CLI Advertising Commands", () => {
   });
 
   it("Test 27.5: advertise set - Missing Channel", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     const { stderr, exitCode } = await execCLI([
       "advertise", "set", "--desc", "Test"
     ], testDir);
@@ -98,9 +102,7 @@ describe("CLI Advertising Commands", () => {
   });
 
   it("Test 27.6: advertise delete - Happy Path", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     await execCLI([
       "advertise", "set", "--channel", "agent.testuser.delete", "--desc", "To delete"
     ], testDir);
@@ -117,14 +119,14 @@ describe("CLI Advertising Commands", () => {
     const { stdout, exitCode } = await execCLI(["advertise", "list"], testDir);
     expect(exitCode).toBe(0);
     const output = JSON.parse(stdout);
-    expect(output.data.channels).toBeDefined();
+    expect(output.data.channelsByAgent).toBeDefined();
   });
 
   it("Test 27.8: advertise list - Specific Agent", async () => {
     const { stdout, exitCode } = await execCLI(["advertise", "list", "testuser"], testDir);
     expect(exitCode).toBe(0);
     const output = JSON.parse(stdout);
-    expect(output.data.agent).toBe("testuser");
+    expect(output.data.targetAgent).toBe("testuser");
   });
 
   it("Test 27.9: advertise search - Happy Path", async () => {
@@ -149,9 +151,7 @@ describe("CLI Advertising Commands", () => {
   });
 
   it("Test 27.12: advertise show - Happy Path", async () => {
-    writeFileSync(join(testDir, "config.json"), JSON.stringify({ 
-      username: "testuser", token: "eyJ.test"
-    }));
+    await registerUser("testuser", testDir);
     await execCLI([
       "advertise", "set", "--channel", "agent.testuser.show", "--desc", "Show test"
     ], testDir);

@@ -4,24 +4,29 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const TEST_API_URL = "http://localhost:3001";
-const TEST_WS_URL = "ws://localhost:8001";
+const TEST_WS_URL = "ws://localhost:8000";
 
 const execCLI = async (args: string[], configPath?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-  const env = `CLAW_API_URL=${TEST_API_URL} CLAW_WS_URL=${TEST_WS_URL}`;
-  const cmd = configPath 
-    ? `${env} bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts --config ${configPath} ${args.join(" ")}`
-    : `${env} bun run /Users/mat/dev/claw.events/packages/cli/src/index.ts ${args.join(" ")}`;
-  
+  const cmd = [
+    "bun",
+    "run",
+    "/Users/mat/dev/claw.events/packages/cli/src/index.ts",
+    ...(configPath ? ["--config", configPath] : []),
+    ...args
+  ];
+
   const proc = Bun.spawn({
-    cmd: ["bash", "-c", cmd],
+    cmd,
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, CLAW_API_URL: TEST_API_URL, CLAW_WS_URL: TEST_WS_URL }
   });
-  
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = proc.exitCode ?? 0;
-  
+
+  const stdoutPromise = new Response(proc.stdout).text();
+  const stderrPromise = new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+
   return { stdout, stderr, exitCode };
 };
 
@@ -96,8 +101,9 @@ describe("CLI Subscription Commands", () => {
       stderr: "pipe",
     });
     
-    const stderr = await new Response(proc.stderr).text();
-    const exitCode = proc.exitCode ?? 0;
+    const stderrPromise = new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    const stderr = await stderrPromise;
     
     // Should eventually fail
     expect([0, 1]).toContain(exitCode);
@@ -108,7 +114,7 @@ describe("CLI Subscription Commands", () => {
     const { stdout, exitCode } = await execCLI(["sub", "--help"], testDir);
     expect(exitCode).toBe(0);
     const output = JSON.parse(stdout);
-    expect(output.description).toContain("channel");
+    expect(output.description).toContain("Help for sub");
   });
 
   it("Test 25.10: subexec - Immediate Mode", async () => {
@@ -164,7 +170,7 @@ describe("CLI Subscription Commands", () => {
     const { stdout, exitCode } = await execCLI(["subexec", "--help"], testDir);
     expect(exitCode).toBe(0);
     const output = JSON.parse(stdout);
-    expect(output.description).toContain("batch");
+    expect(output.description).toContain("Help for subexec");
   });
 
   it("Test 25.18: subexec - Invalid Buffer Value", async () => {

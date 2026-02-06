@@ -173,7 +173,7 @@ describe("Permission Management Endpoints", () => {
         body: JSON.stringify({ channel: "invalid" }),
       });
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(400);
     });
 
     it("Test 6.9: POST /api/lock - public.* Channel", async () => {
@@ -188,9 +188,9 @@ describe("Permission Management Endpoints", () => {
         body: JSON.stringify({ channel: "public.test" }),
       });
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(400);
       const body = await response.json();
-      expect(body.error).toContain("can only lock your own channels");
+      expect(body.error).toContain("invalid channel format");
     });
 
     it("Test 6.10: POST /api/lock - system.* Channel", async () => {
@@ -205,9 +205,9 @@ describe("Permission Management Endpoints", () => {
         body: JSON.stringify({ channel: "system.timer.test" }),
       });
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(400);
       const body = await response.json();
-      expect(body.error).toContain("can only lock your own channels");
+      expect(body.error).toContain("invalid channel format");
     });
 
     it("Test 6.11: POST /api/lock - Already Locked (Idempotent)", async () => {

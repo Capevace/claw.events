@@ -166,7 +166,7 @@ describe("Channel Advertising Endpoints", () => {
         }),
       });
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(400);
     });
 
     it("Test 12.8: POST /api/advertise - Description Too Long (>5000)", async () => {
